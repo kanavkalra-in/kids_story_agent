@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 import time
 import uuid
@@ -14,9 +15,11 @@ import hashlib
 load_dotenv()
 
 # Configuration
+# Use environment variable if set (for Docker), otherwise use sidebar input
+default_api_url = os.getenv("API_BASE_URL", "http://localhost:8000")
 API_BASE_URL = st.sidebar.text_input(
     "API Base URL",
-    value="http://localhost:8000",
+    value=default_api_url,
     help="Base URL of the Kids Story Agent API"
 )
 
@@ -38,6 +41,14 @@ if "story_data" not in st.session_state:
     st.session_state.story_data = None
 if "audio_cache" not in st.session_state:
     st.session_state.audio_cache = {}
+if "selected_story_id" not in st.session_state:
+    st.session_state.selected_story_id = None
+if "loaded_story_data" not in st.session_state:
+    st.session_state.loaded_story_data = None
+if "loaded_story_id" not in st.session_state:
+    st.session_state.loaded_story_id = None
+if "switch_to_view_tab" not in st.session_state:
+    st.session_state.switch_to_view_tab = False
 
 
 def check_api_health() -> bool:
@@ -74,6 +85,15 @@ def get_story(story_id: str) -> dict:
     """Get completed story"""
     url = f"{API_BASE_URL}/api/v1/stories/{story_id}"
     response = requests.get(url, timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+
+def list_stories(limit: int = 100, offset: int = 0) -> dict:
+    """List all stories"""
+    url = f"{API_BASE_URL}/api/v1/stories"
+    params = {"limit": limit, "offset": offset}
+    response = requests.get(url, params=params, timeout=5)
     response.raise_for_status()
     return response.json()
 
@@ -120,7 +140,43 @@ st.sidebar.markdown(f"- [API Docs]({API_BASE_URL}/docs)")
 st.sidebar.markdown(f"- [Health Check]({API_BASE_URL}/health)")
 
 # Main content
-tab1, tab2, tab3 = st.tabs(["Generate Story", "Check Status", "View Story"])
+# Inject JavaScript at app level to handle tab switching
+if st.session_state.switch_to_view_tab:
+    st.markdown("""
+    <script>
+        (function() {
+            function clickViewStoryTab() {
+                try {
+                    const doc = document;
+                    // Find View Story tab button
+                    const buttons = doc.querySelectorAll('button');
+                    for (let btn of buttons) {
+                        if ((btn.textContent || btn.innerText || '').trim() === 'View Story') {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    // Fallback: click 3rd tab (index 2)
+                    const tabs = doc.querySelectorAll('button[data-baseweb="tab"]');
+                    if (tabs.length >= 3) {
+                        tabs[2].click();
+                        return true;
+                    }
+                } catch(e) {
+                    console.error('Tab switch error:', e);
+                }
+                return false;
+            }
+            // Try with delays
+            setTimeout(clickViewStoryTab, 100);
+            setTimeout(clickViewStoryTab, 300);
+            setTimeout(clickViewStoryTab, 600);
+        })();
+    </script>
+    """, unsafe_allow_html=True)
+    st.session_state.switch_to_view_tab = False
+
+tab1, tab2, tab3, tab4 = st.tabs(["Generate Story", "Check Status", "View Story", "All Stories"])
 
 # Tab 1: Generate Story
 with tab1:
@@ -242,24 +298,59 @@ with tab2:
 with tab3:
     st.header("View Completed Story")
     
+    # Check if a story was selected from the All Stories tab
+    selected_id = st.session_state.selected_story_id
+    
     # Story ID input
     story_id_input = st.text_input(
         "Story ID",
-        value=str(st.session_state.story_data["story_id"]) if st.session_state.story_data and st.session_state.story_data.get("story_id") else "",
+        value=str(selected_id) if selected_id else (str(st.session_state.story_data["story_id"]) if st.session_state.story_data and st.session_state.story_data.get("story_id") else ""),
         placeholder="Enter story ID to view",
         help="The story ID from a completed job"
     )
     
     view_button = st.button("Load Story", type="primary")
     
-    if view_button or (story_id_input and st.session_state.story_data and st.session_state.story_data.get("story_id") == story_id_input):
+    # Auto-load if story was selected from All Stories tab or button clicked
+    should_load = view_button or (selected_id and story_id_input and story_id_input == str(selected_id))
+    
+    # Check if we need to load a new story
+    if should_load:
         if not story_id_input:
             st.warning("Please enter a story ID")
         else:
             # Validate UUID format
-            uuid.UUID(story_id_input)
-            
-            story_data = get_story(story_id_input)
+            try:
+                uuid.UUID(story_id_input)
+            except ValueError:
+                st.error("Invalid story ID format. Please enter a valid UUID.")
+            else:
+                try:
+                    story_data = get_story(story_id_input)
+                    # Store in session state so it persists across reruns
+                    st.session_state.loaded_story_data = story_data
+                    st.session_state.loaded_story_id = story_id_input
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Error loading story: {str(e)}")
+                except Exception as e:
+                    st.error(f"Unexpected error: {str(e)}")
+    
+    # Clear the selection after checking (but keep loaded data)
+    if selected_id:
+        st.session_state.selected_story_id = None
+    
+    # Display story if we have loaded data
+    # Show story if: we have loaded data AND (input matches loaded ID OR input is empty OR we just loaded it)
+    if st.session_state.loaded_story_data:
+        # Check if we should show this story (matches current input or no input specified)
+        should_show = (
+            not story_id_input or  # No input specified, show loaded story
+            story_id_input == st.session_state.loaded_story_id or  # Input matches loaded story
+            should_load  # We just loaded it
+        )
+        
+        if should_show:
+            story_data = st.session_state.loaded_story_data
             
             # Display story
             st.markdown(f"## {story_data['title']}")
@@ -294,7 +385,8 @@ with tab3:
             
             # Generate and display audio
             audio_generated = st.session_state.get("audio_generated", {})
-            audio_cache_key = f"{story_id_input}_{tts_lang}"
+            current_story_id = st.session_state.loaded_story_id or story_id_input
+            audio_cache_key = f"{current_story_id}_{tts_lang}"
             
             if generate_audio_btn:
                 full_text = f"{story_data['title']}. {story_data['content']}"
@@ -330,7 +422,34 @@ with tab3:
                 for idx, image in enumerate(story_data['images']):
                     col = cols[idx % len(cols)]
                     with col:
-                        st.image(image['image_url'], width='stretch')
+                        # Resolve relative URLs and local paths to full HTTP URLs
+                        # Streamlit requires full HTTP/HTTPS URLs, not local file paths
+                        image_url = image['image_url']
+                        
+                        # If it's already a full HTTP/HTTPS URL, use it as-is
+                        if not image_url.startswith(('http://', 'https://')):
+                            # Handle old format: storage/images/stories/...
+                            if image_url.startswith('storage/images/'):
+                                # Convert to API endpoint path
+                                relative_path = image_url.replace('storage/images/', '')
+                                image_url = f"{API_BASE_URL.rstrip('/')}/api/v1/stories/images/{relative_path}"
+                            # If it's a relative URL (starts with /), prepend API base URL
+                            elif image_url.startswith('/'):
+                                image_url = f"{API_BASE_URL.rstrip('/')}{image_url}"
+                            # If it contains stories/, try to construct the API URL
+                            elif 'stories/' in image_url:
+                                # Extract the part after stories/
+                                if 'stories/' in image_url:
+                                    parts = image_url.split('stories/', 1)
+                                    if len(parts) == 2:
+                                        image_url = f"{API_BASE_URL.rstrip('/')}/api/v1/stories/images/stories/{parts[1]}"
+                                    else:
+                                        image_url = f"{API_BASE_URL.rstrip('/')}/api/v1/stories/images/{image_url}"
+                            else:
+                                # Unknown format - try to use as API path
+                                image_url = f"{API_BASE_URL.rstrip('/')}/api/v1/stories/images/{image_url}"
+                        
+                        st.image(image_url, width='stretch')
                         with st.expander(f"Image {idx + 1} Details"):
                             st.markdown(f"**Scene:** {image.get('scene_description', 'N/A')}")
                             st.markdown(f"**Prompt Used:** {image.get('prompt_used', 'N/A')}")
@@ -339,6 +458,68 @@ with tab3:
             # Show full JSON
             with st.expander("View Full Story JSON"):
                 st.json(story_data)
+
+# Tab 4: All Stories
+with tab4:
+    st.header("All Stories")
+    st.markdown("Browse and view all created stories")
+    
+    refresh_button = st.button("🔄 Refresh List", type="secondary")
+    
+    try:
+        with st.spinner("Loading stories..."):
+            stories_data = list_stories(limit=100, offset=0)
+            stories = stories_data.get("stories", [])
+            total = stories_data.get("total", 0)
+        
+        if total == 0:
+            st.info("No stories found. Generate a story in the 'Generate Story' tab!")
+        else:
+            st.success(f"Found {total} story/stories")
+            
+            # Display stories in a list
+            for idx, story in enumerate(stories):
+                with st.container():
+                    col1, col2, col3 = st.columns([3, 1, 1])
+                    
+                    with col1:
+                        st.markdown(f"### {story['title']}")
+                        st.markdown(f"**Prompt:** {story['prompt'][:100]}{'...' if len(story['prompt']) > 100 else ''}")
+                    
+                    with col2:
+                        st.markdown(f"**Age Group:** {story['age_group']}")
+                        st.markdown(f"**Images:** {story['num_images']}")
+                    
+                    with col3:
+                        st.markdown(f"**Created:**")
+                        st.markdown(f"{story['created_at'][:10]}")
+                        # Button to view story
+                        if st.button("View Story", key=f"view_{story['id']}", type="primary"):
+                            story_id_str = str(story['id'])
+                            st.session_state.selected_story_id = story_id_str
+                            st.session_state.story_data = {"story_id": story_id_str}
+                            # Pre-load the story so it's ready when they switch tabs
+                            try:
+                                story_data = get_story(story_id_str)
+                                st.session_state.loaded_story_data = story_data
+                                st.session_state.loaded_story_id = story_id_str
+                            except:
+                                pass  # Will load when they switch tabs
+                            
+                            # Set flag to trigger tab switch on next render
+                            st.session_state.switch_to_view_tab = True
+                            st.success(f"✅ **Story '{story['title']}' loaded!** Switching to View Story tab...")
+                            
+                            st.rerun()
+                    
+                    if idx < len(stories) - 1:
+                        st.markdown("---")
+    
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error loading stories: {str(e)}")
+        st.info("Make sure the API is running and accessible.")
+    except Exception as e:
+        st.error(f"Unexpected error: {str(e)}")
 
 # Footer
 st.markdown("---")

@@ -50,5 +50,22 @@ class GenerateStoryResponse(BaseModel):
     message: str
 
 
+class StoryListItem(BaseModel):
+    id: uuid.UUID
+    title: str
+    age_group: str
+    prompt: str
+    created_at: datetime
+    num_images: int
+
+    class Config:
+        from_attributes = True
+
+
+class StoryListResponse(BaseModel):
+    stories: List[StoryListItem]
+    total: int
+
+
 # Update forward references
 StoryResponse.model_rebuild()
