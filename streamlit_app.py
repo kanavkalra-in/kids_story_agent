@@ -7,16 +7,18 @@ from dotenv import load_dotenv
 import os
 from gtts import gTTS
 import io
-import tempfile
 import hashlib
+from app.utils.url import convert_local_path_to_url
 
 # Load .env file
 load_dotenv()
 
 # Configuration
+# Use environment variable if set (for Docker), otherwise use sidebar input
+default_api_url = os.getenv("API_BASE_URL", "http://localhost:8000")
 API_BASE_URL = st.sidebar.text_input(
     "API Base URL",
-    value="http://localhost:8000",
+    value=default_api_url,
     help="Base URL of the Kids Story Agent API"
 )
 
@@ -24,6 +26,7 @@ st.set_page_config(
     page_title="Kids Story Agent - Test UI",
     page_icon="📚",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.title("📚 Kids Story Agent - Test Interface")
@@ -38,21 +41,36 @@ if "story_data" not in st.session_state:
     st.session_state.story_data = None
 if "audio_cache" not in st.session_state:
     st.session_state.audio_cache = {}
+if "selected_story_id" not in st.session_state:
+    st.session_state.selected_story_id = None
+if "loaded_story_data" not in st.session_state:
+    st.session_state.loaded_story_data = None
+if "loaded_story_id" not in st.session_state:
+    st.session_state.loaded_story_id = None
+if "switch_to_view_tab" not in st.session_state:
+    st.session_state.switch_to_view_tab = False
 
 
 def check_api_health() -> bool:
     """Check if API is reachable"""
-    response = requests.get(f"{API_BASE_URL}/health", timeout=5)
-    return response.status_code == 200
+    try:
+        response = requests.get(f"{API_BASE_URL}/health", timeout=5)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
 
 
-def generate_story(prompt: str, age_group: str, num_illustrations: int, webhook_url: Optional[str] = None) -> dict:
+def generate_story(prompt: str, age_group: str, num_illustrations: int, 
+                  generate_images: bool = True, generate_videos: bool = False,
+                  webhook_url: Optional[str] = None) -> dict:
     """Submit story generation request"""
     url = f"{API_BASE_URL}/api/v1/stories/generate"
     payload = {
         "prompt": prompt,
         "age_group": age_group,
         "num_illustrations": num_illustrations,
+        "generate_images": generate_images,
+        "generate_videos": generate_videos,
     }
     if webhook_url:
         payload["webhook_url"] = webhook_url
@@ -78,11 +96,20 @@ def get_story(story_id: str) -> dict:
     return response.json()
 
 
+def list_stories(limit: int = 100, offset: int = 0) -> dict:
+    """List all stories"""
+    url = f"{API_BASE_URL}/api/v1/stories"
+    params = {"limit": limit, "offset": offset}
+    response = requests.get(url, params=params, timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+
 def generate_audio(text: str, story_id: str, lang: str = "en") -> Optional[bytes]:
     """Generate audio from text using gTTS"""
     try:
         # Create a hash of the text to cache audio
-        text_hash = hashlib.md5(f"{story_id}_{text}".encode()).hexdigest()
+        text_hash = hashlib.sha256(f"{story_id}_{text}".encode()).hexdigest()
         
         # Check cache first
         if text_hash in st.session_state.audio_cache:
@@ -120,7 +147,11 @@ st.sidebar.markdown(f"- [API Docs]({API_BASE_URL}/docs)")
 st.sidebar.markdown(f"- [Health Check]({API_BASE_URL}/health)")
 
 # Main content
-tab1, tab2, tab3 = st.tabs(["Generate Story", "Check Status", "View Story"])
+if st.session_state.switch_to_view_tab:
+    st.info("Story loaded! Switch to the **View Story** tab to see it.")
+    st.session_state.switch_to_view_tab = False
+
+tab1, tab2, tab3, tab4 = st.tabs(["Generate Story", "Check Status", "View Story", "All Stories"])
 
 # Tab 1: Generate Story
 with tab1:
@@ -150,8 +181,35 @@ with tab1:
                 min_value=1,
                 max_value=10,
                 value=3,
-                help="Number of images to generate"
+                help="Number of images/videos to generate"
             )
+        
+        # Checkboxes for generation options - INSIDE the form
+        st.markdown("---")
+        st.markdown("#### 📸 Media Generation Options")
+        st.markdown("Select which media types you want to generate:")
+        
+        col_check1, col_check2 = st.columns(2)
+        with col_check1:
+            generate_images = st.checkbox(
+                "🖼️ **Generate Images**",
+                value=True,
+                key="form_generate_images",
+                help="Enable image generation using DALL-E 3"
+            )
+        with col_check2:
+            generate_videos = st.checkbox(
+                "🎬 **Generate Videos**",
+                value=False,
+                key="form_generate_videos",
+                help="Enable video generation using Sora (max 10 seconds per video)"
+            )
+        
+        # Show warning if neither is selected
+        if not generate_images and not generate_videos:
+            st.warning("⚠️ **Warning:** Please select at least one media type (Images or Videos) to generate.")
+        
+        st.markdown("---")
         
         webhook_url = st.text_input(
             "Webhook URL (Optional)",
@@ -164,12 +222,16 @@ with tab1:
         if submitted:
             if not prompt.strip():
                 st.error("Please enter a story prompt")
+            elif not generate_images and not generate_videos:
+                st.error("⚠️ Please select at least one media type (Images or Videos) to generate.")
             else:
                 with st.spinner("Submitting story generation request..."):
                     result = generate_story(
                         prompt=prompt,
                         age_group=age_group,
                         num_illustrations=num_illustrations,
+                        generate_images=generate_images,
+                        generate_videos=generate_videos,
                         webhook_url=webhook_url if webhook_url else None
                     )
                 
@@ -242,24 +304,59 @@ with tab2:
 with tab3:
     st.header("View Completed Story")
     
+    # Check if a story was selected from the All Stories tab
+    selected_id = st.session_state.selected_story_id
+    
     # Story ID input
     story_id_input = st.text_input(
         "Story ID",
-        value=str(st.session_state.story_data["story_id"]) if st.session_state.story_data and st.session_state.story_data.get("story_id") else "",
+        value=str(selected_id) if selected_id else (str(st.session_state.story_data["story_id"]) if st.session_state.story_data and st.session_state.story_data.get("story_id") else ""),
         placeholder="Enter story ID to view",
         help="The story ID from a completed job"
     )
     
     view_button = st.button("Load Story", type="primary")
     
-    if view_button or (story_id_input and st.session_state.story_data and st.session_state.story_data.get("story_id") == story_id_input):
+    # Auto-load if story was selected from All Stories tab or button clicked
+    should_load = view_button or (selected_id and story_id_input and story_id_input == str(selected_id))
+    
+    # Check if we need to load a new story
+    if should_load:
         if not story_id_input:
             st.warning("Please enter a story ID")
         else:
             # Validate UUID format
-            uuid.UUID(story_id_input)
-            
-            story_data = get_story(story_id_input)
+            try:
+                uuid.UUID(story_id_input)
+            except ValueError:
+                st.error("Invalid story ID format. Please enter a valid UUID.")
+            else:
+                try:
+                    story_data = get_story(story_id_input)
+                    # Store in session state so it persists across reruns
+                    st.session_state.loaded_story_data = story_data
+                    st.session_state.loaded_story_id = story_id_input
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Error loading story: {str(e)}")
+                except Exception as e:
+                    st.error(f"Unexpected error: {str(e)}")
+    
+    # Clear the selection after checking (but keep loaded data)
+    if selected_id:
+        st.session_state.selected_story_id = None
+    
+    # Display story if we have loaded data
+    # Show story if: we have loaded data AND (input matches loaded ID OR input is empty OR we just loaded it)
+    if st.session_state.loaded_story_data:
+        # Check if we should show this story (matches current input or no input specified)
+        should_show = (
+            not story_id_input or  # No input specified, show loaded story
+            story_id_input == st.session_state.loaded_story_id or  # Input matches loaded story
+            should_load  # We just loaded it
+        )
+        
+        if should_show:
+            story_data = st.session_state.loaded_story_data
             
             # Display story
             st.markdown(f"## {story_data['title']}")
@@ -294,7 +391,8 @@ with tab3:
             
             # Generate and display audio
             audio_generated = st.session_state.get("audio_generated", {})
-            audio_cache_key = f"{story_id_input}_{tts_lang}"
+            current_story_id = st.session_state.loaded_story_id or story_id_input
+            audio_cache_key = f"{current_story_id}_{tts_lang}"
             
             if generate_audio_btn:
                 full_text = f"{story_data['title']}. {story_data['content']}"
@@ -322,27 +420,112 @@ with tab3:
             st.markdown(story_data['content'])
             
             st.markdown("---")
-            st.markdown(f"### Illustrations ({len(story_data['images'])} images)")
             
-            # Display images in a grid
-            if story_data['images']:
+            # Display images
+            if story_data.get('images'):
+                st.markdown(f"### Illustrations ({len(story_data['images'])} images)")
                 cols = st.columns(min(3, len(story_data['images'])))
                 for idx, image in enumerate(story_data['images']):
                     col = cols[idx % len(cols)]
                     with col:
-                        st.image(image['image_url'], width='stretch')
+                        # Resolve relative URLs and local paths to full HTTP URLs
+                        image_url = convert_local_path_to_url(
+                            image['image_url'],
+                            "image",
+                            api_base_url=API_BASE_URL
+                        )
+                        st.image(image_url, width='stretch')
                         with st.expander(f"Image {idx + 1} Details"):
                             st.markdown(f"**Scene:** {image.get('scene_description', 'N/A')}")
                             st.markdown(f"**Prompt Used:** {image.get('prompt_used', 'N/A')}")
                             st.markdown(f"**Order:** {image.get('display_order', 0)}")
             
+            # Display videos
+            if story_data.get('videos'):
+                st.markdown("---")
+                st.markdown(f"### Videos ({len(story_data['videos'])} videos)")
+                cols = st.columns(min(3, len(story_data['videos'])))
+                for idx, video in enumerate(story_data['videos']):
+                    col = cols[idx % len(cols)]
+                    with col:
+                        # Resolve relative URLs and local paths to full HTTP URLs
+                        video_url = convert_local_path_to_url(
+                            video['video_url'],
+                            "video",
+                            api_base_url=API_BASE_URL
+                        )
+                        st.video(video_url)
+                        with st.expander(f"Video {idx + 1} Details"):
+                            st.markdown(f"**Scene:** {video.get('scene_description', 'N/A')}")
+                            st.markdown(f"**Prompt Used:** {video.get('prompt_used', 'N/A')}")
+                            st.markdown(f"**Order:** {video.get('display_order', 0)}")
+            
             # Show full JSON
             with st.expander("View Full Story JSON"):
                 st.json(story_data)
 
+# Tab 4: All Stories
+with tab4:
+    st.header("All Stories")
+    st.markdown("Browse and view all created stories")
+    
+    refresh_button = st.button("🔄 Refresh List", type="secondary")
+    
+    try:
+        with st.spinner("Loading stories..."):
+            stories_data = list_stories(limit=100, offset=0)
+            stories = stories_data.get("stories", [])
+            total = stories_data.get("total", 0)
+        
+        if total == 0:
+            st.info("No stories found. Generate a story in the 'Generate Story' tab!")
+        else:
+            st.success(f"Found {total} story/stories")
+            
+            # Display stories in a list
+            for idx, story in enumerate(stories):
+                with st.container():
+                    col1, col2, col3 = st.columns([3, 1, 1])
+                    
+                    with col1:
+                        st.markdown(f"### {story['title']}")
+                        st.markdown(f"**Prompt:** {story['prompt'][:100]}{'...' if len(story['prompt']) > 100 else ''}")
+                    
+                    with col2:
+                        st.markdown(f"**Age Group:** {story['age_group']}")
+                        st.markdown(f"**Images:** {story['num_images']}")
+                    
+                    with col3:
+                        st.markdown(f"**Created:**")
+                        st.markdown(f"{story['created_at'][:10]}")
+                        # Button to view story
+                        if st.button("View Story", key=f"view_{story['id']}", type="primary"):
+                            story_id_str = str(story['id'])
+                            st.session_state.selected_story_id = story_id_str
+                            st.session_state.story_data = {"story_id": story_id_str}
+                            # Pre-load the story so it's ready when they switch tabs
+                            try:
+                                story_data = get_story(story_id_str)
+                                st.session_state.loaded_story_data = story_data
+                                st.session_state.loaded_story_id = story_id_str
+                            except Exception:
+                                pass  # Will load when they switch tabs
+                            
+                            # Set flag to trigger tab switch on next render
+                            st.session_state.switch_to_view_tab = True
+                            st.success(f"✅ **Story '{story['title']}' loaded!** Switching to View Story tab...")
+                            
+                            st.rerun()
+                    
+                    if idx < len(stories) - 1:
+                        st.markdown("---")
+    
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error loading stories: {str(e)}")
+        st.info("Make sure the API is running and accessible.")
+    except Exception as e:
+        st.error(f"Unexpected error: {str(e)}")
+
 # Footer
 st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: gray;'>Kids Story Agent - Test Interface</div>",
-    unsafe_allow_html=True
-)
+st.caption("Kids Story Agent - Test Interface")

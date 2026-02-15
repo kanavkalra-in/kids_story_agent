@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, Integer, ForeignKey, DateTime, Enum as SQLEnum
+from sqlalchemy import Column, String, Text, Integer, Boolean, ForeignKey, DateTime, Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -22,6 +22,8 @@ class StoryJob(Base):
     prompt = Column(Text, nullable=False)
     age_group = Column(String(10), nullable=False)  # e.g., "3-5", "6-8", "9-12"
     num_illustrations = Column(Integer, default=3)
+    generate_images = Column(Boolean, default=True, nullable=False)
+    generate_videos = Column(Boolean, default=False, nullable=False)
     status = Column(SQLEnum(JobStatus), default=JobStatus.PENDING, nullable=False)
     webhook_url = Column(String(500), nullable=True)
     celery_task_id = Column(String(255), nullable=True, unique=True)
@@ -47,6 +49,7 @@ class Story(Base):
     # Relationships
     job = relationship("StoryJob", back_populates="story")
     images = relationship("StoryImage", back_populates="story", cascade="all, delete-orphan", order_by="StoryImage.display_order")
+    videos = relationship("StoryVideo", back_populates="story", cascade="all, delete-orphan", order_by="StoryVideo.display_order")
 
 
 class StoryImage(Base):
@@ -62,3 +65,18 @@ class StoryImage(Base):
 
     # Relationships
     story = relationship("Story", back_populates="images")
+
+
+class StoryVideo(Base):
+    __tablename__ = "story_videos"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    story_id = Column(UUID(as_uuid=True), ForeignKey("stories.id"), nullable=False)
+    video_url = Column(String(500), nullable=False)
+    prompt_used = Column(Text, nullable=False)
+    scene_description = Column(Text, nullable=True)
+    display_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    story = relationship("Story", back_populates="videos")

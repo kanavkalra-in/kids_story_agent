@@ -16,7 +16,7 @@ engine = create_async_engine(
     pool_size=20,
     max_overflow=10,
     pool_pre_ping=True,
-    echo=settings.environment == "development",
+    echo=settings.log_sql,
 )
 
 # Create async session factory
@@ -42,7 +42,7 @@ sync_engine = create_engine(
     pool_size=20,
     max_overflow=10,
     pool_pre_ping=True,
-    echo=settings.environment == "development",
+    echo=settings.log_sql,
 )
 
 # Create sync session factory
@@ -55,8 +55,10 @@ SessionLocal = sessionmaker(
 
 
 async def get_db() -> AsyncSession:
-    """Dependency for getting database session"""
+    """Dependency for getting async database session (for FastAPI endpoints)."""
     async with AsyncSessionLocal() as session:
-        yield session
-        await session.commit()
-        await session.close()
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise

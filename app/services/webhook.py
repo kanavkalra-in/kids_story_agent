@@ -1,42 +1,37 @@
 import httpx
-import asyncio
-from typing import Dict, Any
 import logging
+from app.utils.security import validate_webhook_url_no_ssrf
 
 logger = logging.getLogger(__name__)
 
 
-class WebhookService:
-    def __init__(self, max_retries: int = 3, retry_delay: float = 1.0):
-        """
-        Initialize webhook service with retry configuration.
-        
-        Args:
-            max_retries: Maximum number of retry attempts
-            retry_delay: Initial delay between retries (exponential backoff)
-        """
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
+def send_webhook_sync(
+    webhook_url: str,
+    payload: dict[str, Any],
+    timeout: float = 30.0,
+) -> bool:
+    """
+    Send a webhook POST request synchronously (for use in Celery tasks).
+    Re-validates the webhook URL for SSRF protection before sending.
 
-    async def send_webhook(
-        self, 
-        webhook_url: str, 
-        payload: Dict[str, Any],
-        timeout: float = 30.0
-    ) -> bool:
-        """
-        Send webhook POST request.
-        
-        Args:
-            webhook_url: URL to send webhook to
-            payload: JSON payload to send
-            timeout: Request timeout in seconds
-            
-        Returns:
-            True if successful
-        """
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
+    Args:
+        webhook_url: URL to send webhook to
+        payload: JSON payload to send
+        timeout: Request timeout in seconds
+
+    Returns:
+        True if successful, False otherwise
+    """
+    # Re-validate webhook URL at delivery time to prevent TOCTOU attacks
+    try:
+        validate_webhook_url_no_ssrf(webhook_url)
+    except Exception as e:
+        logger.warning(f"Webhook URL validation failed for {webhook_url}: {str(e)}")
+        return False
+    
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(
                 webhook_url,
                 json=payload,
                 headers={"Content-Type": "application/json"},
@@ -44,21 +39,6 @@ class WebhookService:
             response.raise_for_status()
             logger.info(f"Webhook sent successfully to {webhook_url}")
             return True
-
-    async def send_webhook_sync(
-        self,
-        webhook_url: str,
-        payload: Dict[str, Any],
-        timeout: float = 30.0
-    ) -> bool:
-        """
-        Synchronous wrapper for send_webhook (for use in Celery tasks).
-        Creates a new event loop if needed.
-        """
-        loop = asyncio.get_event_loop()
-        
-        return await self.send_webhook(webhook_url, payload, timeout)
-
-
-# Singleton instance
-webhook_service = WebhookService()
+    except httpx.HTTPError as e:
+        logger.warning(f"Failed to send webhook to {webhook_url}: {str(e)}")
+        return False
