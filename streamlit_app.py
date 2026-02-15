@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import requests
 import time
 import uuid
@@ -8,8 +7,8 @@ from dotenv import load_dotenv
 import os
 from gtts import gTTS
 import io
-import tempfile
 import hashlib
+from app.utils.url import convert_local_path_to_url
 
 # Load .env file
 load_dotenv()
@@ -27,6 +26,7 @@ st.set_page_config(
     page_title="Kids Story Agent - Test UI",
     page_icon="📚",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.title("📚 Kids Story Agent - Test Interface")
@@ -53,17 +53,24 @@ if "switch_to_view_tab" not in st.session_state:
 
 def check_api_health() -> bool:
     """Check if API is reachable"""
-    response = requests.get(f"{API_BASE_URL}/health", timeout=5)
-    return response.status_code == 200
+    try:
+        response = requests.get(f"{API_BASE_URL}/health", timeout=5)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
 
 
-def generate_story(prompt: str, age_group: str, num_illustrations: int, webhook_url: Optional[str] = None) -> dict:
+def generate_story(prompt: str, age_group: str, num_illustrations: int, 
+                  generate_images: bool = True, generate_videos: bool = False,
+                  webhook_url: Optional[str] = None) -> dict:
     """Submit story generation request"""
     url = f"{API_BASE_URL}/api/v1/stories/generate"
     payload = {
         "prompt": prompt,
         "age_group": age_group,
         "num_illustrations": num_illustrations,
+        "generate_images": generate_images,
+        "generate_videos": generate_videos,
     }
     if webhook_url:
         payload["webhook_url"] = webhook_url
@@ -102,7 +109,7 @@ def generate_audio(text: str, story_id: str, lang: str = "en") -> Optional[bytes
     """Generate audio from text using gTTS"""
     try:
         # Create a hash of the text to cache audio
-        text_hash = hashlib.md5(f"{story_id}_{text}".encode()).hexdigest()
+        text_hash = hashlib.sha256(f"{story_id}_{text}".encode()).hexdigest()
         
         # Check cache first
         if text_hash in st.session_state.audio_cache:
@@ -140,40 +147,8 @@ st.sidebar.markdown(f"- [API Docs]({API_BASE_URL}/docs)")
 st.sidebar.markdown(f"- [Health Check]({API_BASE_URL}/health)")
 
 # Main content
-# Inject JavaScript at app level to handle tab switching
 if st.session_state.switch_to_view_tab:
-    st.markdown("""
-    <script>
-        (function() {
-            function clickViewStoryTab() {
-                try {
-                    const doc = document;
-                    // Find View Story tab button
-                    const buttons = doc.querySelectorAll('button');
-                    for (let btn of buttons) {
-                        if ((btn.textContent || btn.innerText || '').trim() === 'View Story') {
-                            btn.click();
-                            return true;
-                        }
-                    }
-                    // Fallback: click 3rd tab (index 2)
-                    const tabs = doc.querySelectorAll('button[data-baseweb="tab"]');
-                    if (tabs.length >= 3) {
-                        tabs[2].click();
-                        return true;
-                    }
-                } catch(e) {
-                    console.error('Tab switch error:', e);
-                }
-                return false;
-            }
-            // Try with delays
-            setTimeout(clickViewStoryTab, 100);
-            setTimeout(clickViewStoryTab, 300);
-            setTimeout(clickViewStoryTab, 600);
-        })();
-    </script>
-    """, unsafe_allow_html=True)
+    st.info("Story loaded! Switch to the **View Story** tab to see it.")
     st.session_state.switch_to_view_tab = False
 
 tab1, tab2, tab3, tab4 = st.tabs(["Generate Story", "Check Status", "View Story", "All Stories"])
@@ -206,8 +181,35 @@ with tab1:
                 min_value=1,
                 max_value=10,
                 value=3,
-                help="Number of images to generate"
+                help="Number of images/videos to generate"
             )
+        
+        # Checkboxes for generation options - INSIDE the form
+        st.markdown("---")
+        st.markdown("#### 📸 Media Generation Options")
+        st.markdown("Select which media types you want to generate:")
+        
+        col_check1, col_check2 = st.columns(2)
+        with col_check1:
+            generate_images = st.checkbox(
+                "🖼️ **Generate Images**",
+                value=True,
+                key="form_generate_images",
+                help="Enable image generation using DALL-E 3"
+            )
+        with col_check2:
+            generate_videos = st.checkbox(
+                "🎬 **Generate Videos**",
+                value=False,
+                key="form_generate_videos",
+                help="Enable video generation using Sora (max 10 seconds per video)"
+            )
+        
+        # Show warning if neither is selected
+        if not generate_images and not generate_videos:
+            st.warning("⚠️ **Warning:** Please select at least one media type (Images or Videos) to generate.")
+        
+        st.markdown("---")
         
         webhook_url = st.text_input(
             "Webhook URL (Optional)",
@@ -220,12 +222,16 @@ with tab1:
         if submitted:
             if not prompt.strip():
                 st.error("Please enter a story prompt")
+            elif not generate_images and not generate_videos:
+                st.error("⚠️ Please select at least one media type (Images or Videos) to generate.")
             else:
                 with st.spinner("Submitting story generation request..."):
                     result = generate_story(
                         prompt=prompt,
                         age_group=age_group,
                         num_illustrations=num_illustrations,
+                        generate_images=generate_images,
+                        generate_videos=generate_videos,
                         webhook_url=webhook_url if webhook_url else None
                     )
                 
@@ -414,46 +420,45 @@ with tab3:
             st.markdown(story_data['content'])
             
             st.markdown("---")
-            st.markdown(f"### Illustrations ({len(story_data['images'])} images)")
             
-            # Display images in a grid
-            if story_data['images']:
+            # Display images
+            if story_data.get('images'):
+                st.markdown(f"### Illustrations ({len(story_data['images'])} images)")
                 cols = st.columns(min(3, len(story_data['images'])))
                 for idx, image in enumerate(story_data['images']):
                     col = cols[idx % len(cols)]
                     with col:
                         # Resolve relative URLs and local paths to full HTTP URLs
-                        # Streamlit requires full HTTP/HTTPS URLs, not local file paths
-                        image_url = image['image_url']
-                        
-                        # If it's already a full HTTP/HTTPS URL, use it as-is
-                        if not image_url.startswith(('http://', 'https://')):
-                            # Handle old format: storage/images/stories/...
-                            if image_url.startswith('storage/images/'):
-                                # Convert to API endpoint path
-                                relative_path = image_url.replace('storage/images/', '')
-                                image_url = f"{API_BASE_URL.rstrip('/')}/api/v1/stories/images/{relative_path}"
-                            # If it's a relative URL (starts with /), prepend API base URL
-                            elif image_url.startswith('/'):
-                                image_url = f"{API_BASE_URL.rstrip('/')}{image_url}"
-                            # If it contains stories/, try to construct the API URL
-                            elif 'stories/' in image_url:
-                                # Extract the part after stories/
-                                if 'stories/' in image_url:
-                                    parts = image_url.split('stories/', 1)
-                                    if len(parts) == 2:
-                                        image_url = f"{API_BASE_URL.rstrip('/')}/api/v1/stories/images/stories/{parts[1]}"
-                                    else:
-                                        image_url = f"{API_BASE_URL.rstrip('/')}/api/v1/stories/images/{image_url}"
-                            else:
-                                # Unknown format - try to use as API path
-                                image_url = f"{API_BASE_URL.rstrip('/')}/api/v1/stories/images/{image_url}"
-                        
+                        image_url = convert_local_path_to_url(
+                            image['image_url'],
+                            "image",
+                            api_base_url=API_BASE_URL
+                        )
                         st.image(image_url, width='stretch')
                         with st.expander(f"Image {idx + 1} Details"):
                             st.markdown(f"**Scene:** {image.get('scene_description', 'N/A')}")
                             st.markdown(f"**Prompt Used:** {image.get('prompt_used', 'N/A')}")
                             st.markdown(f"**Order:** {image.get('display_order', 0)}")
+            
+            # Display videos
+            if story_data.get('videos'):
+                st.markdown("---")
+                st.markdown(f"### Videos ({len(story_data['videos'])} videos)")
+                cols = st.columns(min(3, len(story_data['videos'])))
+                for idx, video in enumerate(story_data['videos']):
+                    col = cols[idx % len(cols)]
+                    with col:
+                        # Resolve relative URLs and local paths to full HTTP URLs
+                        video_url = convert_local_path_to_url(
+                            video['video_url'],
+                            "video",
+                            api_base_url=API_BASE_URL
+                        )
+                        st.video(video_url)
+                        with st.expander(f"Video {idx + 1} Details"):
+                            st.markdown(f"**Scene:** {video.get('scene_description', 'N/A')}")
+                            st.markdown(f"**Prompt Used:** {video.get('prompt_used', 'N/A')}")
+                            st.markdown(f"**Order:** {video.get('display_order', 0)}")
             
             # Show full JSON
             with st.expander("View Full Story JSON"):
@@ -503,7 +508,7 @@ with tab4:
                                 story_data = get_story(story_id_str)
                                 st.session_state.loaded_story_data = story_data
                                 st.session_state.loaded_story_id = story_id_str
-                            except:
+                            except Exception:
                                 pass  # Will load when they switch tabs
                             
                             # Set flag to trigger tab switch on next render
@@ -523,7 +528,4 @@ with tab4:
 
 # Footer
 st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: gray;'>Kids Story Agent - Test Interface</div>",
-    unsafe_allow_html=True
-)
+st.caption("Kids Story Agent - Test Interface")

@@ -1,9 +1,5 @@
 from celery import Celery
-from dotenv import load_dotenv
 from app.config import settings
-
-# Load .env file
-load_dotenv()
 
 celery_app = Celery(
     "kids_story_agent",
@@ -20,8 +16,8 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
-    task_time_limit=300,  # 5 minutes max per task
-    task_soft_time_limit=240,  # 4 minutes soft limit
+    task_time_limit=1800,  # 30 minutes hard limit (video generation with polling can be very slow)
+    task_soft_time_limit=1500,  # 25 minutes soft limit
     worker_prefetch_multiplier=1,
     worker_max_tasks_per_child=50,
     # Rate limiting for external APIs

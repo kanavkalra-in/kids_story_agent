@@ -9,6 +9,8 @@ class StoryRequest(BaseModel):
     age_group: str = Field(..., description="Target age group (3-5, 6-8, or 9-12)")
     num_illustrations: int = Field(default=3, ge=1, le=10, description="Number of illustrations")
     webhook_url: Optional[HttpUrl] = Field(None, description="Optional webhook URL for completion notification")
+    generate_images: bool = Field(default=True, description="Whether to generate images")
+    generate_videos: bool = Field(default=False, description="Whether to generate videos")
 
 
 class StoryResponse(BaseModel):
@@ -19,6 +21,7 @@ class StoryResponse(BaseModel):
     prompt: str
     created_at: datetime
     images: List["StoryImageResponse"]
+    videos: List["StoryVideoResponse"]
 
     class Config:
         from_attributes = True
@@ -27,6 +30,17 @@ class StoryResponse(BaseModel):
 class StoryImageResponse(BaseModel):
     id: uuid.UUID
     image_url: str
+    prompt_used: str
+    scene_description: Optional[str]
+    display_order: int
+
+    class Config:
+        from_attributes = True
+
+
+class StoryVideoResponse(BaseModel):
+    id: uuid.UUID
+    video_url: str
     prompt_used: str
     scene_description: Optional[str]
     display_order: int

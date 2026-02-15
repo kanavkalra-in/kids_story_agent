@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import Literal
+from typing import Literal, Optional
 from dotenv import load_dotenv
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Storage
     storage_type: Literal["s3", "local"] = "local"
     local_storage_path: str = "storage/images"
+    local_video_storage_path: str = "storage/videos"
     
     # AWS S3
     aws_access_key_id: str = ""
@@ -29,6 +30,7 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-1"
     s3_bucket_name: str = "kids-stories-media"
     cloudfront_domain: str = ""
+    s3_public_read: bool = False  # Whether to make S3 objects publicly readable
     
     # LLM Provider
     llm_provider: Literal["openai", "anthropic", "ollama"] = "ollama"
@@ -45,12 +47,20 @@ class Settings(BaseSettings):
     dalle_quality: str = "standard"
     
     # API Settings
+    api_key: Optional[str] = None  # Set to enable API key auth; leave unset to disable
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    rate_limit_per_minute: int = 500
+    rate_limit_per_minute: int = 100
+    max_request_size_mb: int = 10
+    
+    # CORS Settings
+    cors_origins: str = ""  # Comma-separated list of allowed origins, or "*" for all (empty = require explicit config)
     
     # Environment
     environment: str = "development"
+    
+    # Logging
+    log_sql: bool = False  # Whether to echo SQL queries (separate from environment)
     
     class Config:
         env_file = ".env"

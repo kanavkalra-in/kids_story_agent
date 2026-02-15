@@ -1,11 +1,17 @@
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel
 from app.services.llm import get_llm
 from app.agents.state import StoryState
 from app.config import settings
-from typing import Dict
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class StoryOutput(BaseModel):
+    """Output containing story title and text."""
+    title: str
+    story_text: str
 
 
 def get_age_group_instructions(age_group: str) -> str:
@@ -39,14 +45,12 @@ def get_age_group_instructions(age_group: str) -> str:
     return age_instructions.get(age_group, age_instructions["6-8"])
 
 
-def story_writer_node(state: StoryState) -> Dict:
+def story_writer_node(state: StoryState) -> dict:
     """Generate the story text based on prompt and age group"""
     job_id = state.get("job_id", "unknown")
-    # Use Ollama for story writing
-    llm = get_llm(provider="ollama")
+    llm = get_llm()
     
-    # Log which LLM provider is being used
-    logger.info(f"Job {job_id}: Story writer using Ollama (model: {settings.ollama_model})")
+    logger.info(f"Job {job_id}: Story writer using LLM provider: {settings.llm_provider}")
     
     age_instructions = get_age_group_instructions(state["age_group"])
     
@@ -72,12 +76,6 @@ Requirements:
 Please provide:
 1. A title for the story
 2. The full story text
-
-Format your response as:
-TITLE: [story title]
-
-STORY:
-[story text here]
 """
     
     messages = [
@@ -85,42 +83,11 @@ STORY:
         HumanMessage(content=user_prompt),
     ]
     
-    response = llm.invoke(messages)
-    story_content = response.content
-    
-    # Parse title and story
-    lines = story_content.split("\n")
-    title = None
-    story_text = []
-    in_story = False
-    
-    for line in lines:
-        if line.startswith("TITLE:"):
-            title = line.replace("TITLE:", "").strip()
-        elif line.startswith("STORY:") or in_story:
-            if line.startswith("STORY:"):
-                in_story = True
-                continue
-            story_text.append(line.strip())
-    
-    # Fallback parsing if format is different
-    if not title:
-        # Try to extract first line as title
-        first_line = lines[0].strip()
-        if len(first_line) < 100 and not first_line.startswith("Once"):
-            title = first_line
-            story_text = "\n".join(lines[1:]).strip()
-        else:
-            title = "A Wonderful Story"
-            story_text = "\n".join(lines).strip()
-    
-    if isinstance(story_text, list):
-        story_text = "\n".join(story_text).strip()
-    
-    if not story_text:
-        story_text = story_content.strip()
+    # Use structured output to get reliable parsing
+    structured_llm = llm.with_structured_output(StoryOutput)
+    output = structured_llm.invoke(messages)
     
     return {
-        "story_title": title or "A Wonderful Story",
-        "story_text": story_text,
+        "story_title": output.title or "A Wonderful Story",
+        "story_text": output.story_text,
     }
