@@ -13,8 +13,11 @@ from app.schemas.story import (
     GenerateStoryResponse,
     StoryListResponse,
     StoryListItem,
+    RejectedStoryListResponse,
+    RejectedStoryItem,
 )
 from app.models.story import StoryJob, Story, StoryImage, StoryVideo, JobStatus
+from app.models.review import StoryReview
 from app.tasks.story_tasks import generate_story_task, update_job_status_redis
 from app.config import settings, limiter
 from app.services.redis_client import get_redis_client
@@ -166,8 +169,10 @@ async def list_stories(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    """List all completed stories"""
+    """List all approved/published stories"""
     # Use window function to get total count in the same query as data
+    # Join with StoryJob to filter by published status
+    # Include stories that are PUBLISHED or not explicitly rejected (for backward compatibility with existing stories)
     result = await db.execute(
         select(
             Story,
@@ -175,8 +180,16 @@ async def list_stories(
             func.count(StoryVideo.id.distinct()).label('num_videos'),
             func.count(Story.id).over().label('total')
         )
+        .join(StoryJob, Story.job_id == StoryJob.id)
         .outerjoin(StoryImage, Story.id == StoryImage.story_id)
         .outerjoin(StoryVideo, Story.id == StoryVideo.story_id)
+        .where(
+            StoryJob.status.in_([
+                JobStatus.PUBLISHED,
+                JobStatus.COMPLETED,  # For backward compatibility with existing stories
+                JobStatus.APPROVED,    # If any exist
+            ])
+        )
         .group_by(Story.id)
         .order_by(Story.created_at.desc())
         .limit(limit)
@@ -202,6 +215,78 @@ async def list_stories(
     
     return StoryListResponse(
         stories=story_items,
+        total=total,
+    )
+
+
+@router.get("/rejected", response_model=RejectedStoryListResponse)
+async def list_rejected_stories(
+    limit: int = 100,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """List all rejected stories (both LLM/guardrail and human rejections)"""
+    # Query jobs with status REJECTED or AUTO_REJECTED that have reviews
+    result = await db.execute(
+        select(
+            StoryJob,
+            Story.id.label("story_id"),
+            Story.title.label("story_title"),
+            Story.content.label("story_content"),
+            StoryReview.rejection_reason,
+            StoryReview.comment,
+            StoryReview.reviewer_id,
+            StoryReview.reviewed_at,
+            func.count(StoryJob.id).over().label('total')
+        )
+        .outerjoin(Story, Story.job_id == StoryJob.id)
+        .join(StoryReview, StoryReview.job_id == StoryJob.id)
+        .where(StoryJob.status.in_([JobStatus.REJECTED, JobStatus.AUTO_REJECTED]))
+        .order_by(StoryReview.reviewed_at.desc().nulls_last(), StoryJob.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = result.all()
+    
+    # Extract total from first row (all rows have the same total due to window function)
+    total = rows[0].total if rows else 0
+    
+    # Build rejected story items
+    rejected_stories = []
+    for row in rows:
+        job, story_id, story_title, story_content, rejection_reason, comment, reviewer_id, reviewed_at, _ = row
+        
+        # Fetch images for this story if it exists
+        image_urls = []
+        if story_id:
+            images_result = await db.execute(
+                select(StoryImage.image_url)
+                .where(StoryImage.story_id == story_id)
+                .order_by(StoryImage.display_order)
+            )
+            # images_result.scalars().all() returns strings (image_url values), not objects
+            image_urls = [
+                convert_local_path_to_url(img_url, "image")
+                for img_url in images_result.scalars().all()
+            ]
+        
+        rejected_stories.append(RejectedStoryItem(
+            job_id=job.id,
+            story_id=story_id,
+            story_title=story_title,
+            story_content=story_content,
+            age_group=job.age_group,
+            prompt=job.prompt,
+            rejection_reason=rejection_reason,
+            comment=comment,
+            reviewer_id=reviewer_id,
+            created_at=job.created_at,
+            reviewed_at=reviewed_at,
+            image_urls=image_urls,
+        ))
+    
+    return RejectedStoryListResponse(
+        stories=rejected_stories,
         total=total,
     )
 

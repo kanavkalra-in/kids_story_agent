@@ -135,7 +135,9 @@ def generate_media_prompts(
     prompts = [str(scene.prompt) for scene in scenes]
     descriptions = [str(scene.description) for scene in scenes]
     
-    # Explicitly clear the Pydantic model reference to prevent serialization issues
+    # Explicitly clear the Pydantic model references to prevent serialization issues
+    # with LangGraph's checkpointer. Delete both the output and scenes list.
+    del scenes
     del output
     
     logger.info(

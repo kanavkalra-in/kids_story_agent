@@ -266,20 +266,35 @@ class ImageSafetyOutput(BaseModel):
 **Retry Logic**:
 - If hard violation detected → regenerate image once
 - Re-check regenerated image
-- If still fails → raise `StoryGenerationError`
+- If retry also fails → raise `StoryGenerationError` to fail the entire graph
+
+**State Management**:
+- Returns `image_urls_final` with structure `[{"index": image_index, "url": image_url}]`
+- Pydantic model references are explicitly deleted after use to prevent serialization issues with LangGraph's checkpointer
 
 ### Video Safety
 
-**Implementation**: Prompt moderation + optional frame sampling
+**Implementation**: Prompt moderation (text guardrails on Sora prompt)
+
+Since videos are generated from text prompts (no audio dialogue), video safety is implemented as **prompt moderation** — checking the Sora prompt text using the same 3-layer text safety pipeline used for story content.
 
 **Checks**:
-1. **Prompt Moderation**: Check Sora prompt using text guardrails
-2. **Frame Sampling** (optional): Extract frames, check each with vision model
+1. **Prompt Moderation**: Runs text guardrails (Layer 0: OpenAI Moderation API, Layer 1: PII Detection, Layer 2: Custom LLM Analysis) on the Sora prompt
+   - Guardrail violation names are prefixed with `video_prompt_` to distinguish from story-level violations
+   - Uses the same age-group-specific thresholds as story text guardrails
+
+2. **Frame Sampling** (not yet implemented): Frame extraction and vision-based safety checks are planned but not currently implemented
+   - When `VIDEO_FRAME_SAMPLING_ENABLED=true`, a warning is logged indicating frame extraction is not yet available
+   - Future implementation will use ffmpeg to extract frames and run vision-based safety checks
 
 **Retry Logic**:
-- If hard violation detected → regenerate video once
-- Re-check regenerated video
-- If still fails → raise `StoryGenerationError`
+- If hard violation detected → regenerate video once using the same prompt
+- Re-check regenerated video's prompt
+- If retry also fails → raise `StoryGenerationError` to fail the entire graph
+
+**State Management**:
+- Returns `video_urls_final` with structure `[{"index": video_index, "url": video_url}]`
+- Pydantic model references are explicitly deleted after use to prevent serialization issues with LangGraph's checkpointer
 
 ## Guardrail Aggregation
 
@@ -366,8 +381,8 @@ GUARDRAIL_AUTO_REJECT_ON_HARD_FAIL=true
 # Enable OpenAI Moderation API
 ENABLE_OPENAI_MODERATION=true
 
-# Video frame sampling
-VIDEO_FRAME_SAMPLING_ENABLED=true
+# Video frame sampling (not yet implemented - currently only prompt moderation is used)
+VIDEO_FRAME_SAMPLING_ENABLED=false
 VIDEO_SAMPLE_FRAMES=5
 ```
 
@@ -444,6 +459,26 @@ graph TD
 2. **Early Exit**: Stop checking if hard violation found
 3. **Parallel Checks**: All guardrails run concurrently
 4. **Caching**: Cache moderation results for identical content
+
+### State Management & Serialization
+
+**Pydantic Model Cleanup**: All guardrail nodes explicitly delete Pydantic model references after extracting violation data to prevent serialization issues with LangGraph's PostgreSQL checkpointer:
+
+```python
+# Extract violations from Pydantic model
+text_safety = check_text_safety(story_text, age_group)
+violations = build_text_violations(text_safety, media_type="story")
+
+# Explicitly clear the Pydantic model reference
+del text_safety
+```
+
+This pattern is used in:
+- `story_guardrail_node`: Clears `text_safety` after building violations
+- `image_guardrail_with_retry_node`: Clears `safety_output` after each check
+- `video_guardrail_with_retry_node`: Clears `prompt_safety` after building violations
+
+**Guardrail Name Prefixing**: Video prompt violations are prefixed with `video_prompt_` to distinguish them from story-level violations (e.g., `video_prompt_fear_intensity` vs `fear_intensity`).
 
 ## Monitoring
 

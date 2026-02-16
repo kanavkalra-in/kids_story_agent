@@ -60,6 +60,7 @@ def review_timeout_check():
                     reviewer_id="system_timeout",
                     decision=REVIEW_TIMEOUT_REJECTED,
                     comment=f"Auto-rejected: No review received within {timeout_days} day(s)",
+                    rejection_reason="timeout",
                     guardrail_passed=True,
                 ))
 

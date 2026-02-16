@@ -79,6 +79,10 @@ def story_guardrail_node(state: StoryState) -> dict:
         )
     else:
         logger.info(f"Job {job_id}: [L2-LLM] Passed")
+    
+    # Explicitly clear the Pydantic model reference to prevent serialization issues
+    # with LangGraph's checkpointer (similar to story_writer.py)
+    del text_safety
 
     hard_count = sum(1 for v in violations if v["severity"] == "hard")
     soft_count = sum(1 for v in violations if v["severity"] == "soft")

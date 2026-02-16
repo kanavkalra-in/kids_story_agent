@@ -123,6 +123,9 @@ async def _check_video_safety(
     prompt_violations = build_text_violations(
         prompt_safety, media_type="video", media_index=video_index,
     )
+    # Explicitly clear the Pydantic model reference to prevent serialization issues
+    # with LangGraph's checkpointer
+    del prompt_safety
     # Prefix guardrail names to distinguish from story-level violations
     for v in prompt_violations:
         v["guardrail_name"] = f"video_prompt_{v['guardrail_name']}"

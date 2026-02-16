@@ -93,6 +93,10 @@ async def image_guardrail_with_retry_node(state: StoryState) -> dict:
     safety_output = await check_image_safety_async(image_url, age_group)
     violations = build_image_violations(safety_output, media_index=image_index, media_type="image")
     hard_violations = [v for v in violations if v["severity"] == SEVERITY_HARD]
+    
+    # Explicitly clear the Pydantic model reference to prevent serialization issues
+    # with LangGraph's checkpointer
+    del safety_output
 
     if not hard_violations:
         logger.info(
@@ -118,6 +122,10 @@ async def image_guardrail_with_retry_node(state: StoryState) -> dict:
     safety_output = await check_image_safety_async(image_url, age_group)
     retry_violations = build_image_violations(safety_output, media_index=image_index, media_type="image")
     hard_violations = [v for v in retry_violations if v["severity"] == SEVERITY_HARD]
+    
+    # Explicitly clear the Pydantic model reference to prevent serialization issues
+    # with LangGraph's checkpointer
+    del safety_output
 
     if not hard_violations:
         logger.info(

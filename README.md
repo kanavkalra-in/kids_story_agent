@@ -46,7 +46,7 @@ graph TB
         EVAL["Story Evaluator<br/>Quality scoring"]
         STORY_GUARD["Story Guardrail<br/>3-layer text safety"]
         IMG_GUARD["Image Guardrail N instances<br/>Vision-based, with retry"]
-        VID_GUARD["Video Guardrail M instances<br/>Prompt + frame sampling"]
+        VID_GUARD["Video Guardrail M instances<br/>Prompt moderation"]
         AGGREGATOR["Guardrail Aggregator<br/>Decision logic"]
         REVIEW["Human Review Gate<br/>LangGraph Interrupt"]
         PUBLISHER["Publisher<br/>Final persistence"]
@@ -109,8 +109,8 @@ graph TB
 
 **Media Guardrails:**
 - Vision-based image safety (NSFW, weapons, realistic children, horror elements)
-- Video prompt moderation + optional frame sampling
-- Automatic regeneration on hard violations (configurable retry limit)
+- Video prompt moderation (text guardrails on Sora prompts; frame sampling planned but not yet implemented)
+- Automatic regeneration on hard violations (single retry per media item)
 
 ### 📊 Comprehensive Evaluation
 
