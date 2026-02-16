@@ -1,5 +1,5 @@
 from app.agents.state import StoryState
-from app.agents.prompter_utils import generate_media_prompts
+from app.agents.nodes.generation.prompter_utils import generate_media_prompts
 
 
 def video_prompter_node(state: StoryState) -> dict:

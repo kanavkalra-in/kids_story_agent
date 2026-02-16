@@ -1,11 +1,15 @@
 from celery import Celery
+from celery.schedules import crontab
 from app.config import settings
 
 celery_app = Celery(
     "kids_story_agent",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.story_tasks"],
+    include=[
+        "app.tasks.story_tasks",
+        "app.tasks.review_timeout_task",
+    ],
 )
 
 # Celery configuration
@@ -23,4 +27,11 @@ celery_app.conf.update(
     # Rate limiting for external APIs
     task_acks_late=True,
     worker_disable_rate_limits=False,
+    # Celery Beat schedule for periodic tasks
+    beat_schedule={
+        "review-timeout-check": {
+            "task": "review_timeout_check",
+            "schedule": crontab(minute=0),  # Every hour, on the hour
+        },
+    },
 )

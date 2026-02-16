@@ -6,9 +6,12 @@ import asyncio
 
 from alembic import context
 
-# Import your models and Base
+# Import your models and Base — all models must be imported for autogenerate
 from app.db.session import Base
-from app.models.story import Story, StoryImage, StoryJob
+from app.models.story import Story, StoryImage, StoryVideo, StoryJob, JobStatus  # noqa: F401
+from app.models.evaluation import StoryEvaluation  # noqa: F401
+from app.models.guardrail import GuardrailResult  # noqa: F401
+from app.models.review import StoryReview  # noqa: F401
 from app.config import settings
 
 # this is the Alembic Config object, which provides

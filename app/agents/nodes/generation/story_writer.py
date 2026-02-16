@@ -48,7 +48,7 @@ def get_age_group_instructions(age_group: str) -> str:
 def story_writer_node(state: StoryState) -> dict:
     """Generate the story text based on prompt and age group"""
     job_id = state.get("job_id", "unknown")
-    llm = get_llm()
+    llm = get_llm("ollama")
     
     logger.info(f"Job {job_id}: Story writer using LLM provider: {settings.llm_provider}")
     
@@ -87,7 +87,15 @@ Please provide:
     structured_llm = llm.with_structured_output(StoryOutput)
     output = structured_llm.invoke(messages)
     
+    # Immediately convert Pydantic model to plain Python types to avoid serialization issues
+    # with LangGraph's checkpointer. Extract data before returning state.
+    story_title = str(output.title) if output.title else "A Wonderful Story"
+    story_text = str(output.story_text)
+    
+    # Explicitly clear the Pydantic model reference to prevent serialization issues
+    del output
+    
     return {
-        "story_title": output.title or "A Wonderful Story",
-        "story_text": output.story_text,
+        "story_title": story_title,
+        "story_text": story_text,
     }

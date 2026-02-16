@@ -1,5 +1,6 @@
 import httpx
 import logging
+from typing import Any
 from app.utils.security import validate_webhook_url_no_ssrf
 
 logger = logging.getLogger(__name__)
