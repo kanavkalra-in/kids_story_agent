@@ -48,7 +48,7 @@ def get_age_group_instructions(age_group: str) -> str:
 def story_writer_node(state: StoryState) -> dict:
     """Generate the story text based on prompt and age group"""
     job_id = state.get("job_id", "unknown")
-    llm = get_llm()
+    llm = get_llm("ollama")
     
     logger.info(f"Job {job_id}: Story writer using LLM provider: {settings.llm_provider}")
     

@@ -42,6 +42,9 @@ class StoryState(TypedDict):
     # Error handling
     error: Optional[str]
 
+    # ── Input Moderation (set by input_moderator node) ──
+    input_moderation_passed: Optional[bool]
+
     # ── Evaluation Scores (set by story_evaluator node) ──
     evaluation_scores: Optional[dict]
 

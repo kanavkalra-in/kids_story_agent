@@ -1,5 +1,6 @@
 from app.services.openai_client import get_openai_client
 from app.services.s3 import s3_service
+from app.services.storage import save_image_locally
 from app.config import settings
 from app.agents.state import StoryState
 from app.agents.nodes.generation.prompter_utils import StoryGenerationError
@@ -8,25 +9,8 @@ import httpx
 import logging
 import uuid
 import asyncio
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-def _save_image_locally(image_data: bytes, story_id: str, image_id: str) -> str:
-    """Save an image to local storage and return the relative file path."""
-    base_storage_path = Path(settings.local_storage_path)
-    if not base_storage_path.is_absolute():
-        base_storage_path = Path.cwd() / base_storage_path
-
-    storage_dir = base_storage_path / "stories" / story_id
-    storage_dir.mkdir(parents=True, exist_ok=True)
-
-    image_path = storage_dir / f"{image_id}.png"
-    with open(image_path, "wb") as f:
-        f.write(image_data)
-
-    return str(image_path.relative_to(Path.cwd()))
 
 
 async def image_generator_node(state: StoryState) -> dict:
@@ -84,7 +68,7 @@ async def image_generator_node(state: StoryState) -> dict:
 
     if settings.storage_type == "local":
         local_path = await asyncio.to_thread(
-            _save_image_locally, image_data, story_id, image_id
+            save_image_locally, image_data, story_id, image_id
         )
         final_url = local_path
         logger.info(f"Job {job_id}: Image {image_index + 1} saved locally: {local_path}")

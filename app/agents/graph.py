@@ -2,51 +2,70 @@
 LangGraph workflow for story generation with evaluation, guardrails,
 and human-in-the-loop review.
 
-Parallelism strategy (all handled natively by LangGraph — no asyncio.gather):
+Guardrails (single standard framework — OpenAI Moderation API):
 
-1. **Prompter parallelism** — Static edges: ``story_writer`` has edges to
+- **OpenAI Moderation API** — Fast pre-filter on input + output (~50ms, free)
+- **Regex PII** — Email, phone, SSN, credit card detection
+- **Custom LLM prompts** — Domain-specific kids content safety analysis
+
+Parallelism strategy (all handled natively by LangGraph):
+
+1. **Input moderation** — ``input_moderator`` checks the user's prompt BEFORE
+   generation via OpenAI Moderation API. If blocked, routes to
+   ``mark_auto_rejected`` without invoking any LLMs.
+
+2. **Prompter parallelism** — Static edges: ``story_writer`` has edges to
    both ``image_prompter`` and ``video_prompter``; LangGraph runs them in
    parallel and waits for both before proceeding.
 
-2. **Generator fan-out** — Dynamic ``Send``: Both prompters route to generators
+3. **Generator fan-out** — Dynamic ``Send``: Both prompters route to generators
    by inspecting the prompt lists and emitting one ``Send`` per image/video prompt.
 
-3. **Guardrail fan-out** — From the assembler, ``route_to_guardrails`` emits
+4. **Guardrail fan-out** — From the assembler, ``route_to_guardrails`` emits
    one ``Send`` per: story_evaluator, story_guardrail, each image_guardrail,
    each video_guardrail. All run in parallel.
 
-4. **Human-in-the-loop** — ``human_review_gate`` uses LangGraph's ``interrupt()``
+5. **Human-in-the-loop** — ``human_review_gate`` uses LangGraph's ``interrupt()``
    to pause execution. State is checkpointed to PostgresSaver. The graph resumes
    when the review API calls ``Command(resume=...)``.
 
 Graph shape:
 
-    story_writer
-        ├──► image_prompter ──┐
-        └──► video_prompter ──┤
-                              ▼ (fan-in)
-        ┌──► generate_single_image (×N) ──┐
-        └──► generate_single_video (×M) ──┤
-                                          ▼
-                                      assembler
-                                          │
-                        route_to_guardrails (fan-out)
-                      /       |            |           \\
-          story_eval  story_guard  img_guard(×N)  vid_guard(×M)
-                      \\      |            |           /
-                        guardrail_aggregator (fan-in)
-                                          │
-                    ┌── has hard violations? ──┐
-                    │yes                       │no
-           mark_auto_rejected         human_review_gate (interrupt)
-                    │                         │
-                   END              ┌── decision? ──┐
-                                    │               │
-                              [approved]       [rejected]
-                                    │               │
-                               publisher      mark_rejected
-                                    │               │
-                                   END             END
+                        input_moderator (OpenAI Moderation API)
+                                │
+                    ┌── input safe? ──┐
+                    │no               │yes
+           mark_auto_rejected    story_writer
+                    │               ├──► image_prompter ──┐
+                   END              └──► video_prompter ──┤
+                                                          ▼ (fan-in)
+                                ┌──► generate_single_image (×N) ──┐
+                                └──► generate_single_video (×M) ──┤
+                                                                  ▼
+                                                              assembler
+                                                                  │
+                                            route_to_guardrails (fan-out)
+                                          /       |            |           \\
+                              story_eval  story_guard  img_guard(×N)  vid_guard(×M)
+                                          \\      |            |           /
+                                            guardrail_aggregator (fan-in)
+                                                                  │
+                                            ┌── has hard violations? ──┐
+                                            │yes                       │no
+                                   mark_auto_rejected         human_review_gate
+                                            │                         │
+                                           END              ┌── decision? ──┐
+                                                            │               │
+                                                      [approved]       [rejected]
+                                                            │               │
+                                                       publisher      mark_rejected
+                                                            │               │
+                                                           END             END
+
+    story_guardrail pipeline (3 layers):
+        Layer 0: OpenAI Moderation API (fast pre-filter)
+        Layer 1: Regex PII detection (emails, phones, SSNs, credit cards)
+        Layer 2: Custom LLM safety analysis (fear, violence, brand, political, religious)
 """
 
 from langgraph.graph import StateGraph, END
@@ -60,6 +79,8 @@ from app.agents.nodes import (
     image_generator_node,
     video_generator_node,
     assembler_node,
+    # Input Moderation (prevention layer)
+    input_moderator_node,
     # Evaluation & Guardrails phase
     story_evaluator_node,
     story_guardrail_node,
@@ -84,13 +105,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def route_to_generators(state: StoryState) -> Union[list[Send], str]:
+def route_after_input_moderation(state: StoryState) -> str:
     """
-    Fan-out from prompters to individual generator instances.
+    After input moderation: if prompt was blocked, auto-reject immediately.
+    Otherwise proceed to story generation.
+    """
+    if state.get("input_moderation_passed", True) is False:
+        logger.info(
+            f"Job {state.get('job_id')}: Input blocked → auto-reject "
+            f"(skipping generation entirely)"
+        )
+        return "mark_auto_rejected"
+    return "story_writer"
 
-    Creates one ``Send`` per image prompt and one per video prompt.  Each
-    ``Send`` only includes the minimal state keys needed by the generator nodes
-    to avoid copying the full state (including story text and all prompts).
+
+def route_to_image_generators(state: StoryState) -> Union[list[Send], str]:
+    """
+    Fan-out from image_prompter to individual image generator instances.
+
+    Creates one ``Send`` per image prompt. Only includes the minimal state
+    keys needed by the generator node.
     """
     sends: list[Send] = []
 
@@ -109,6 +143,22 @@ def route_to_generators(state: StoryState) -> Union[list[Send], str]:
             "_current_description": desc,
         }))
 
+    if not sends:
+        return "assembler"
+
+    return sends
+
+
+def route_to_video_generators(state: StoryState) -> Union[list[Send], str]:
+    """
+    Fan-out from video_prompter to individual video generator instances.
+
+    Creates one ``Send`` per video prompt. Only includes the minimal state
+    keys needed by the generator node.
+    """
+    sends: list[Send] = []
+
+    job_id = state.get("job_id", "unknown")
     video_prompts = state.get("video_prompts", [])
     video_descriptions = state.get("video_descriptions", [])
     generate_videos = state.get("generate_videos", False)
@@ -124,7 +174,6 @@ def route_to_generators(state: StoryState) -> Union[list[Send], str]:
         }))
 
     if not sends:
-        # Nothing to generate → go straight to assembler
         return "assembler"
 
     return sends
@@ -220,8 +269,13 @@ def route_after_review(state: StoryState) -> str:
 def _get_checkpointer():
     """
     Create a PostgresSaver checkpointer for interrupt() support.
-    Falls back to MemorySaver for development/testing.
+
+    PostgresSaver is required for human-in-the-loop workflows to survive
+    worker restarts. Raises on connection errors — ensure PostgreSQL
+    is running and the connection string is valid.
     """
+    from langgraph.checkpoint.postgres import PostgresSaver
+
     conn_string = settings.checkpointer_conn_string
 
     if not conn_string:
@@ -231,19 +285,10 @@ def _get_checkpointer():
             "postgresql+asyncpg://", "postgresql://"
         )
 
-    try:
-        from langgraph.checkpoint.postgres import PostgresSaver
-        checkpointer = PostgresSaver.from_conn_string(conn_string)
-        checkpointer.setup()
-        logger.info("Using PostgresSaver checkpointer for human-in-the-loop support")
-        return checkpointer
-    except Exception as e:
-        logger.warning(
-            f"Failed to create PostgresSaver checkpointer: {e}. "
-            f"Falling back to MemorySaver (not suitable for production)."
-        )
-        from langgraph.checkpoint.memory import MemorySaver
-        return MemorySaver()
+    checkpointer = PostgresSaver.from_conn_string(conn_string)
+    checkpointer.setup()
+    logger.info("Using PostgresSaver checkpointer for human-in-the-loop support")
+    return checkpointer
 
 
 def create_story_graph() -> StateGraph:
@@ -251,7 +296,10 @@ def create_story_graph() -> StateGraph:
 
     workflow = StateGraph(StoryState)
 
-    # ── Generation nodes (existing) ──
+    # ── Input Moderation node (prevention layer) ──
+    workflow.add_node("input_moderator", input_moderator_node)
+
+    # ── Generation nodes ──
     workflow.add_node("story_writer", story_writer_node)
     workflow.add_node("image_prompter", image_prompter_node)
     workflow.add_node("video_prompter", video_prompter_node)
@@ -259,35 +307,35 @@ def create_story_graph() -> StateGraph:
     workflow.add_node("generate_single_video", video_generator_node)
     workflow.add_node("assembler", assembler_node)
 
-    # ── Evaluation & Guardrail nodes (NEW) ──
+    # ── Evaluation & Guardrail nodes ──
     workflow.add_node("story_evaluator", story_evaluator_node)
     workflow.add_node("story_guardrail", story_guardrail_node)
     workflow.add_node("image_guardrail_with_retry", image_guardrail_with_retry_node)
     workflow.add_node("video_guardrail_with_retry", video_guardrail_with_retry_node)
     workflow.add_node("guardrail_aggregator", guardrail_aggregator_node)
 
-    # ── Human review & publish nodes (NEW) ──
+    # ── Human review & publish nodes ──
     workflow.add_node("human_review_gate", human_review_gate_node)
     workflow.add_node("publisher", publisher_node)
     workflow.add_node("mark_auto_rejected", mark_auto_rejected_node)
     workflow.add_node("mark_rejected", mark_rejected_node)
 
-    # ── Edges: Generation pipeline (existing) ──
-    workflow.set_entry_point("story_writer")
+    # ── Edges: Input moderation → generation pipeline ──
+    workflow.set_entry_point("input_moderator")
+
+    # input_moderator → story_writer (if safe) or mark_auto_rejected (if blocked)
+    workflow.add_conditional_edges("input_moderator", route_after_input_moderation,
+                                  ["story_writer", "mark_auto_rejected"])
 
     # story_writer → both prompters (static edges, always run in parallel)
     workflow.add_edge("story_writer", "image_prompter")
     workflow.add_edge("story_writer", "video_prompter")
 
-    # Both prompters → fan-in and route to generators
-    workflow.add_conditional_edges("image_prompter", route_to_generators,
-                                  ["generate_single_image",
-                                   "generate_single_video",
-                                   "assembler"])
-    workflow.add_conditional_edges("video_prompter", route_to_generators,
-                                  ["generate_single_image",
-                                   "generate_single_video",
-                                   "assembler"])
+    # Each prompter routes only to its own generators (avoids duplicate Sends)
+    workflow.add_conditional_edges("image_prompter", route_to_image_generators,
+                                  ["generate_single_image", "assembler"])
+    workflow.add_conditional_edges("video_prompter", route_to_video_generators,
+                                  ["generate_single_video", "assembler"])
 
     # All generators → assembler (fan-in)
     workflow.add_edge("generate_single_image", "assembler")
@@ -325,8 +373,16 @@ def create_story_graph() -> StateGraph:
     return workflow.compile(checkpointer=checkpointer)
 
 
-# Compiled graph singleton
-story_graph = create_story_graph()
+# Lazy-initialized graph singleton — avoids connecting to PostgreSQL at import time
+_story_graph = None
+
+
+def get_story_graph():
+    """Get or create the compiled story graph (lazy singleton)."""
+    global _story_graph
+    if _story_graph is None:
+        _story_graph = create_story_graph()
+    return _story_graph
 
 
 async def run_story_generation(initial_state: StoryState, thread_id: str = None) -> StoryState:
@@ -338,6 +394,7 @@ async def run_story_generation(initial_state: StoryState, thread_id: str = None)
         thread_id: Unique thread ID for checkpointing (defaults to job_id).
                    Required for interrupt()/resume to work correctly.
     """
+    graph = get_story_graph()
     tid = thread_id or initial_state.get("job_id", "unknown")
     config = {"configurable": {"thread_id": tid}}
-    return await story_graph.ainvoke(initial_state, config=config)
+    return await graph.ainvoke(initial_state, config=config)

@@ -7,13 +7,14 @@ Runs periodically (e.g., every hour) and scans for expired pending reviews.
 
 from datetime import datetime, timedelta, timezone
 from app.celery_app import celery_app
-from app.db.session import SessionLocal
+from app.db.session import get_sync_db
 from app.models.story import StoryJob, JobStatus
 from app.models.review import StoryReview
-from app.tasks.story_tasks import update_job_status_redis
+from app.services.redis_client import get_redis_client
 from app.config import settings
-from app.constants import REVIEW_TIMEOUT_REJECTED
+from app.constants import REVIEW_TIMEOUT_REJECTED, JOB_STATUS_CACHE_TTL
 import uuid
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,8 +29,7 @@ def review_timeout_check():
     timeout_days = settings.review_timeout_days
     cutoff = datetime.now(timezone.utc) - timedelta(days=timeout_days)
 
-    db = SessionLocal()
-    try:
+    with get_sync_db() as db:
         expired_jobs = (
             db.query(StoryJob)
             .filter(
@@ -45,6 +45,7 @@ def review_timeout_check():
 
         logger.info(f"Found {len(expired_jobs)} expired pending reviews (>{timeout_days} days)")
 
+        redis = get_redis_client()
         for job in expired_jobs:
             job_id = str(job.id)
 
@@ -63,17 +64,12 @@ def review_timeout_check():
                 ))
 
             job.status = JobStatus.REJECTED
-            update_job_status_redis(job_id, "rejected")
+            # Update Redis cache
+            cache_key = f"job_status:{job_id}"
+            redis.setex(cache_key, JOB_STATUS_CACHE_TTL, json.dumps({"status": "rejected", "error": None}))
 
             logger.info(f"Job {job_id}: Timeout-rejected (pending since {job.updated_at})")
 
         db.commit()
 
         return {"expired_count": len(expired_jobs)}
-
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Review timeout check failed: {e}")
-        raise
-    finally:
-        db.close()

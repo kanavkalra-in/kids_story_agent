@@ -18,7 +18,7 @@ from app.schemas.story import (
 from app.models.story import StoryJob, Story, StoryImage, StoryVideo, JobStatus
 from app.tasks.story_tasks import generate_story_task, update_job_status_redis
 from app.config import settings, limiter
-from app.services.redis_client import redis_client
+from app.services.redis_client import get_redis_client
 from app.constants import (
     VALID_AGE_GROUPS,
     MAX_PROMPT_LENGTH_CHARS,
@@ -74,7 +74,13 @@ async def generate_story(
     
     # Validate webhook URL if provided — resolve and block private/reserved IPs (SSRF)
     if story_request.webhook_url:
-        validate_webhook_url_no_ssrf(str(story_request.webhook_url))
+        try:
+            validate_webhook_url_no_ssrf(str(story_request.webhook_url))
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
     
     # Create job record with sanitized prompt
     job = StoryJob(
@@ -117,7 +123,7 @@ async def get_job_status(
     """Get the status of a story generation job"""
     # Try Redis cache first
     cache_key = f"job_status:{job_id}"
-    cached = redis_client.get(cache_key)
+    cached = get_redis_client().get(cache_key)
     
     # Always fetch job from DB for timestamps and story_id
     # Use a single query with left join to get both job and story

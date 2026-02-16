@@ -31,7 +31,7 @@ from app.schemas.review import (
 )
 from app.schemas.story import GenerateStoryResponse
 from app.tasks.story_tasks import generate_story_task, update_job_status_redis
-from app.agents.graph import story_graph
+from app.agents.graph import get_story_graph
 from app.constants import SEVERITY_HARD, SEVERITY_SOFT
 from app.utils.url import convert_local_path_to_url
 import uuid
@@ -54,88 +54,58 @@ async def list_pending_reviews(
     db: AsyncSession = Depends(get_db),
 ):
     """List all stories awaiting human review."""
-    # Query jobs with PENDING_REVIEW status
+    # Single query with JOINs and conditional aggregation (avoids N+1)
+    hard_violation_count = (
+        func.count(GuardrailResult.id)
+        .filter(GuardrailResult.severity == SEVERITY_HARD)
+    )
+    soft_violation_count = (
+        func.count(GuardrailResult.id)
+        .filter(GuardrailResult.severity == SEVERITY_SOFT)
+    )
+
     result = await db.execute(
         select(
             StoryJob,
             Story.title.label("story_title"),
             Story.id.label("story_id"),
+            StoryEvaluation.overall_score.label("eval_score"),
+            hard_violation_count.label("hard_count"),
+            soft_violation_count.label("soft_count"),
+            func.count(StoryImage.id.distinct()).label("num_images"),
+            func.count(StoryVideo.id.distinct()).label("num_videos"),
+            func.count(StoryJob.id).over().label("total"),
         )
         .outerjoin(Story, Story.job_id == StoryJob.id)
+        .outerjoin(StoryEvaluation, StoryEvaluation.job_id == StoryJob.id)
+        .outerjoin(GuardrailResult, GuardrailResult.job_id == StoryJob.id)
+        .outerjoin(StoryImage, StoryImage.story_id == Story.id)
+        .outerjoin(StoryVideo, StoryVideo.story_id == Story.id)
         .where(StoryJob.status == JobStatus.PENDING_REVIEW)
+        .group_by(StoryJob.id, Story.title, Story.id, StoryEvaluation.overall_score)
         .order_by(StoryJob.created_at.asc())  # oldest first (FIFO)
         .limit(limit)
         .offset(offset)
     )
     rows = result.all()
 
-    # Get total count
-    count_result = await db.execute(
-        select(func.count(StoryJob.id))
-        .where(StoryJob.status == JobStatus.PENDING_REVIEW)
-    )
-    total = count_result.scalar() or 0
+    total = rows[0].total if rows else 0
 
     reviews = []
     for row in rows:
         job = row[0]
-        story_title = row[1]
-        story_id = row[2]
-
-        # Get evaluation score
-        eval_result = await db.execute(
-            select(StoryEvaluation.overall_score)
-            .where(StoryEvaluation.job_id == job.id)
-        )
-        eval_score = eval_result.scalar()
-
-        # Count violations by severity
-        hard_count_result = await db.execute(
-            select(func.count(GuardrailResult.id))
-            .where(
-                GuardrailResult.job_id == job.id,
-                GuardrailResult.severity == SEVERITY_HARD,
-            )
-        )
-        hard_count = hard_count_result.scalar() or 0
-
-        soft_count_result = await db.execute(
-            select(func.count(GuardrailResult.id))
-            .where(
-                GuardrailResult.job_id == job.id,
-                GuardrailResult.severity == SEVERITY_SOFT,
-            )
-        )
-        soft_count = soft_count_result.scalar() or 0
-
-        # Count media
-        num_images = 0
-        num_videos = 0
-        if story_id:
-            img_count_result = await db.execute(
-                select(func.count(StoryImage.id))
-                .where(StoryImage.story_id == story_id)
-            )
-            num_images = img_count_result.scalar() or 0
-
-            vid_count_result = await db.execute(
-                select(func.count(StoryVideo.id))
-                .where(StoryVideo.story_id == story_id)
-            )
-            num_videos = vid_count_result.scalar() or 0
-
         reviews.append(PendingReviewItem(
             job_id=job.id,
-            story_title=story_title,
+            story_title=row.story_title,
             age_group=job.age_group,
             prompt=job.prompt,
-            overall_eval_score=eval_score,
-            guardrail_passed=hard_count == 0,
-            num_hard_violations=hard_count,
-            num_soft_violations=soft_count,
+            overall_eval_score=row.eval_score,
+            guardrail_passed=(row.hard_count or 0) == 0,
+            num_hard_violations=row.hard_count or 0,
+            num_soft_violations=row.soft_count or 0,
             created_at=job.created_at,
-            num_images=num_images,
-            num_videos=num_videos,
+            num_images=row.num_images or 0,
+            num_videos=row.num_videos or 0,
         ))
 
     return PendingReviewListResponse(reviews=reviews, total=total)
@@ -289,7 +259,7 @@ async def submit_review_decision(
 
         # Run the graph resume in a background thread since it may involve
         # async operations (publisher node uploads to S3)
-        final_state = await story_graph.ainvoke(
+        final_state = await get_story_graph().ainvoke(
             Command(resume=resume_value),
             config=config,
         )

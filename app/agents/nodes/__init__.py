@@ -2,7 +2,7 @@
 All LangGraph node functions re-exported for convenient imports.
 
 Usage in graph.py:
-    from app.agents.nodes import story_writer_node, image_prompter_node, ...
+    from app.agents.nodes import story_writer_node, input_moderator_node, ...
 """
 
 # ── Generation phase ──
@@ -16,6 +16,9 @@ from app.agents.nodes.generation.prompter_utils import (
     StoryGenerationError,
     generate_media_prompts,
 )
+
+# ── Input Moderation (prevention layer) ──
+from app.agents.nodes.evaluation.input_moderator import input_moderator_node
 
 # ── Evaluation & Guardrails phase ──
 from app.agents.nodes.evaluation.story_evaluator import story_evaluator_node
@@ -42,6 +45,8 @@ __all__ = [
     "assembler_node",
     "StoryGenerationError",
     "generate_media_prompts",
+    # Input Moderation
+    "input_moderator_node",
     # Evaluation & Guardrails
     "story_evaluator_node",
     "story_guardrail_node",

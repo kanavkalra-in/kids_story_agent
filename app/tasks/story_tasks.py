@@ -1,12 +1,14 @@
+from langgraph.errors import GraphInterrupt
+
 from app.celery_app import celery_app
-from app.agents.graph import run_story_generation, story_graph
+from app.agents.graph import run_story_generation
 from app.agents.state import StoryState
 from app.models.story import Story, StoryImage, StoryVideo, StoryJob, JobStatus
 from app.models.evaluation import StoryEvaluation
 from app.models.guardrail import GuardrailResult
 from app.models.review import StoryReview
-from app.db.session import SessionLocal
-from app.services.redis_client import redis_client
+from app.db.session import get_sync_db
+from app.services.redis_client import get_redis_client
 from app.services.webhook import send_webhook_sync
 from app.agents.nodes.generation.prompter_utils import StoryGenerationError
 from app.constants import (
@@ -24,33 +26,45 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ── Status mapping: string status → JobStatus enum ──
+_STATUS_MAP = {
+    "pending": JobStatus.PENDING,
+    "processing": JobStatus.PROCESSING,
+    "pending_review": JobStatus.PENDING_REVIEW,
+    "published": JobStatus.PUBLISHED,
+    "rejected": JobStatus.REJECTED,
+    "auto_rejected": JobStatus.AUTO_REJECTED,
+    "failed": JobStatus.FAILED,
+}
 
-def update_job_status_redis(job_id: str, status: str, error: str = None):
-    """Update job status in Redis cache for fast polling"""
+
+def update_job_status(job_id: str, status: str, error: str = None):
+    """Update job status in both Redis (fast polling) and DB (durable) in one call."""
+    # Redis update
     cache_key = f"job_status:{job_id}"
-    cache_data = {
-        "status": status,
-        "error": error,
-    }
-    redis_client.setex(
-        cache_key,
-        JOB_STATUS_CACHE_TTL,
-        json.dumps(cache_data),
-    )
+    cache_data = {"status": status, "error": error}
+    get_redis_client().setex(cache_key, JOB_STATUS_CACHE_TTL, json.dumps(cache_data))
 
-
-def update_job_status_db(job_id: str, status: JobStatus, error: str = None):
-    """Update job status in database using sync SQLAlchemy"""
-    db = SessionLocal()
-    try:
+    # DB update
+    db_status = _STATUS_MAP.get(status)
+    if db_status is None:
+        logger.warning(f"Unknown status '{status}' — skipping DB update for job {job_id}")
+        return
+    with get_sync_db() as db:
         job = db.query(StoryJob).filter(StoryJob.id == uuid.UUID(job_id)).first()
         if job:
-            job.status = status
+            job.status = db_status
             if error:
                 job.error_message = error
             db.commit()
-    finally:
-        db.close()
+
+
+# Keep backward-compatible alias used by reviews API and review_timeout_task
+def update_job_status_redis(job_id: str, status: str, error: str = None):
+    """Update job status in Redis cache only (for use outside Celery tasks)."""
+    cache_key = f"job_status:{job_id}"
+    cache_data = {"status": status, "error": error}
+    get_redis_client().setex(cache_key, JOB_STATUS_CACHE_TTL, json.dumps(cache_data))
 
 
 @celery_app.task(bind=True, name="generate_story_task")
@@ -78,12 +92,10 @@ async def _generate_story_async(job_id: str, task_id: str) -> dict[str, Any]:
     Async implementation of the story generation task.
     """
     # Update status to processing
-    update_job_status_redis(job_id, "processing")
-    update_job_status_db(job_id, JobStatus.PROCESSING)
+    update_job_status(job_id, "processing")
 
     # Load job data from database
-    db = SessionLocal()
-    try:
+    with get_sync_db() as db:
         job = db.query(StoryJob).filter(StoryJob.id == uuid.UUID(job_id)).first()
         if not job:
             raise ValueError(f"Job {job_id} not found")
@@ -93,8 +105,6 @@ async def _generate_story_async(job_id: str, task_id: str) -> dict[str, Any]:
         generate_images = job.generate_images
         generate_videos = job.generate_videos
         webhook_url = job.webhook_url
-    finally:
-        db.close()
 
     # Prepare initial state for LangGraph
     initial_state: StoryState = {
@@ -138,20 +148,14 @@ async def _generate_story_async(job_id: str, task_id: str) -> dict[str, Any]:
     except StoryGenerationError as e:
         error_msg = str(e)
         logger.error(f"Story generation failed for job {job_id}: {error_msg}")
-        update_job_status_redis(job_id, "failed", error_msg)
-        update_job_status_db(job_id, JobStatus.FAILED, error_msg)
+        update_job_status(job_id, "failed", error_msg)
         return {"job_id": job_id, "status": "failed", "error": error_msg}
-    except Exception as e:
-        # The graph may have been interrupted (human_review_gate)
+    except GraphInterrupt:
         # LangGraph raises GraphInterrupt when interrupt() is called
-        from langgraph.errors import GraphInterrupt
-        if isinstance(e, GraphInterrupt):
-            logger.info(f"Job {job_id}: Graph interrupted for human review")
-            _persist_pre_review_data(job_id, initial_state)
-            update_job_status_redis(job_id, "pending_review")
-            update_job_status_db(job_id, JobStatus.PENDING_REVIEW)
-            return {"job_id": job_id, "status": "pending_review"}
-        raise
+        logger.info(f"Job {job_id}: Graph interrupted for human review")
+        _persist_pre_review_data(job_id, initial_state)
+        update_job_status(job_id, "pending_review")
+        return {"job_id": job_id, "status": "pending_review"}
 
     # Check if the graph was interrupted (for human review)
     # This happens when interrupt() is called — the graph returns partial state
@@ -161,8 +165,7 @@ async def _generate_story_async(job_id: str, task_id: str) -> dict[str, Any]:
         # Graph was interrupted — waiting for human review
         logger.info(f"Job {job_id}: Awaiting human review")
         _persist_pre_review_data(job_id, final_state)
-        update_job_status_redis(job_id, "pending_review")
-        update_job_status_db(job_id, JobStatus.PENDING_REVIEW)
+        update_job_status(job_id, "pending_review")
         return {"job_id": job_id, "status": "pending_review"}
 
     # Process the review decision
@@ -174,103 +177,112 @@ def _persist_pre_review_data(job_id: str, state: dict):
     Persist story, evaluation, and guardrail data to DB before human review.
     This ensures the reviewer can see the data even if the Celery worker restarts.
     """
-    db = SessionLocal()
     try:
-        job = db.query(StoryJob).filter(StoryJob.id == uuid.UUID(job_id)).first()
-        if not job:
-            logger.error(f"Job {job_id} not found for pre-review persistence")
-            return
+        with get_sync_db() as db:
+            job = db.query(StoryJob).filter(StoryJob.id == uuid.UUID(job_id)).first()
+            if not job:
+                logger.error(f"Job {job_id} not found for pre-review persistence")
+                return
 
-        # Persist story if not already saved
-        existing_story = db.query(Story).filter(Story.job_id == uuid.UUID(job_id)).first()
-        if not existing_story and state.get("story_text"):
-            story = Story(
-                id=uuid.uuid4(),
-                job_id=job.id,
-                title=state.get("story_title") or DEFAULT_STORY_TITLE,
-                content=state.get("story_text", ""),
-                age_group=state.get("age_group", "6-8"),
-                prompt=state.get("prompt", ""),
-            )
-            db.add(story)
-            db.flush()
+            _ensure_story_persisted(db, job, state)
+            _ensure_evaluation_persisted(db, job, state)
+            _ensure_guardrails_persisted(db, job, state)
 
-            # Persist images
-            for idx, url in enumerate(state.get("image_urls", [])):
-                metadata = {}
-                image_metadata = state.get("image_metadata", [])
-                if idx < len(image_metadata):
-                    metadata = image_metadata[idx]
-                db.add(StoryImage(
-                    id=uuid.uuid4(),
-                    story_id=story.id,
-                    image_url=url,
-                    prompt_used=metadata.get("prompt", ""),
-                    scene_description=metadata.get("description", ""),
-                    display_order=idx,
-                ))
-
-            # Persist videos
-            for idx, url in enumerate(state.get("video_urls", [])):
-                metadata = {}
-                video_metadata = state.get("video_metadata", [])
-                if idx < len(video_metadata):
-                    metadata = video_metadata[idx]
-                db.add(StoryVideo(
-                    id=uuid.uuid4(),
-                    story_id=story.id,
-                    video_url=url,
-                    prompt_used=metadata.get("prompt", ""),
-                    scene_description=metadata.get("description", ""),
-                    display_order=idx,
-                ))
-
-        # Persist evaluation scores
-        eval_scores = state.get("evaluation_scores")
-        if eval_scores:
-            existing_eval = db.query(StoryEvaluation).filter(
-                StoryEvaluation.job_id == uuid.UUID(job_id)
-            ).first()
-            if not existing_eval:
-                db.add(StoryEvaluation(
-                    id=uuid.uuid4(),
-                    job_id=job.id,
-                    moral_score=eval_scores.get("moral_score", 0),
-                    theme_appropriateness=eval_scores.get("theme_appropriateness", 0),
-                    emotional_positivity=eval_scores.get("emotional_positivity", 0),
-                    age_appropriateness=eval_scores.get("age_appropriateness", 0),
-                    educational_value=eval_scores.get("educational_value", 0),
-                    overall_score=eval_scores.get("overall_score", 0),
-                    evaluation_summary=eval_scores.get("evaluation_summary", ""),
-                ))
-
-        # Persist guardrail violations
-        violations = state.get("guardrail_violations", [])
-        if violations:
-            existing_count = db.query(GuardrailResult).filter(
-                GuardrailResult.job_id == uuid.UUID(job_id)
-            ).count()
-            if existing_count == 0:
-                for v in violations:
-                    db.add(GuardrailResult(
-                        id=uuid.uuid4(),
-                        job_id=job.id,
-                        guardrail_name=v.get("guardrail_name", "unknown"),
-                        media_type=v.get("media_type", "unknown"),
-                        media_index=v.get("media_index"),
-                        severity=v.get("severity", "soft"),
-                        confidence=v.get("confidence", 0),
-                        detail=v.get("detail", ""),
-                    ))
-
-        db.commit()
-        logger.info(f"Job {job_id}: Pre-review data persisted to DB")
+            db.commit()
+            logger.info(f"Job {job_id}: Pre-review data persisted to DB")
 
     except Exception as e:
-        db.rollback()
         logger.error(f"Job {job_id}: Failed to persist pre-review data: {e}")
-    finally:
-        db.close()
+
+
+def _ensure_story_persisted(db, job, state: dict):
+    """Persist story + media if not already saved. Reusable across persist paths."""
+    existing = db.query(Story).filter(Story.job_id == job.id).first()
+    if existing or not state.get("story_text"):
+        return existing
+
+    story = Story(
+        id=uuid.uuid4(),
+        job_id=job.id,
+        title=state.get("story_title") or DEFAULT_STORY_TITLE,
+        content=state.get("story_text", ""),
+        age_group=state.get("age_group", "6-8"),
+        prompt=state.get("prompt", ""),
+    )
+    db.add(story)
+    db.flush()
+
+    image_metadata = state.get("image_metadata", [])
+    for idx, url in enumerate(state.get("image_urls", [])):
+        metadata = image_metadata[idx] if idx < len(image_metadata) else {}
+        db.add(StoryImage(
+            id=uuid.uuid4(),
+            story_id=story.id,
+            image_url=url,
+            prompt_used=metadata.get("prompt", ""),
+            scene_description=metadata.get("description", ""),
+            display_order=idx,
+        ))
+
+    video_metadata = state.get("video_metadata", [])
+    for idx, url in enumerate(state.get("video_urls", [])):
+        metadata = video_metadata[idx] if idx < len(video_metadata) else {}
+        db.add(StoryVideo(
+            id=uuid.uuid4(),
+            story_id=story.id,
+            video_url=url,
+            prompt_used=metadata.get("prompt", ""),
+            scene_description=metadata.get("description", ""),
+            display_order=idx,
+        ))
+
+    return story
+
+
+def _ensure_evaluation_persisted(db, job, state: dict):
+    """Persist evaluation scores if not already saved."""
+    eval_scores = state.get("evaluation_scores")
+    if not eval_scores:
+        return
+    existing = db.query(StoryEvaluation).filter(
+        StoryEvaluation.job_id == job.id
+    ).first()
+    if existing:
+        return
+    db.add(StoryEvaluation(
+        id=uuid.uuid4(),
+        job_id=job.id,
+        moral_score=eval_scores.get("moral_score", 0),
+        theme_appropriateness=eval_scores.get("theme_appropriateness", 0),
+        emotional_positivity=eval_scores.get("emotional_positivity", 0),
+        age_appropriateness=eval_scores.get("age_appropriateness", 0),
+        educational_value=eval_scores.get("educational_value", 0),
+        overall_score=eval_scores.get("overall_score", 0),
+        evaluation_summary=eval_scores.get("evaluation_summary", ""),
+    ))
+
+
+def _ensure_guardrails_persisted(db, job, state: dict):
+    """Persist guardrail violations if not already saved."""
+    violations = state.get("guardrail_violations", [])
+    if not violations:
+        return
+    existing_count = db.query(GuardrailResult).filter(
+        GuardrailResult.job_id == job.id
+    ).count()
+    if existing_count > 0:
+        return
+    for v in violations:
+        db.add(GuardrailResult(
+            id=uuid.uuid4(),
+            job_id=job.id,
+            guardrail_name=v.get("guardrail_name", "unknown"),
+            media_type=v.get("media_type", "unknown"),
+            media_index=v.get("media_index"),
+            severity=v.get("severity", "soft"),
+            confidence=v.get("confidence", 0),
+            detail=v.get("detail", ""),
+        ))
 
 
 def _handle_review_outcome(
@@ -282,158 +294,111 @@ def _handle_review_outcome(
     if review_decision == REVIEW_APPROVED:
         # Persist final data and mark as published
         try:
-            story_id = _persist_story_to_db(
-                job_id,
-                final_state.get("story_text"),
-                final_state.get("story_title"),
-                final_state.get("image_urls", []),
-                final_state.get("image_metadata", []),
-                final_state.get("video_urls", []),
-                final_state.get("video_metadata", []),
-                final_state,
-            )
+            story_id = _persist_story_to_db(job_id, final_state)
 
             _persist_review_to_db(job_id, final_state)
 
             if webhook_url:
-                _send_completion_webhook(
-                    webhook_url, job_id, story_id,
-                    final_state.get("story_text"),
-                    final_state.get("story_title"),
-                    final_state.get("image_urls", []),
-                    final_state.get("image_metadata", []),
-                    final_state.get("video_urls", []),
-                    final_state.get("video_metadata", []),
-                )
+                _send_completion_webhook(webhook_url, job_id, story_id)
 
-            update_job_status_redis(job_id, "published")
-            update_job_status_db(job_id, JobStatus.PUBLISHED)
+            update_job_status(job_id, "published")
             logger.info(f"Job {job_id}: Story approved and published")
             return {"job_id": job_id, "status": "published", "story_id": story_id}
 
         except Exception as e:
             error_msg = f"Failed to publish story: {str(e)}"
             logger.error(f"Job {job_id}: {error_msg}")
-            update_job_status_redis(job_id, "failed", error_msg)
-            update_job_status_db(job_id, JobStatus.FAILED, error_msg)
+            update_job_status(job_id, "failed", error_msg)
             return {"job_id": job_id, "status": "failed", "error": error_msg}
 
     elif review_decision == REVIEW_AUTO_REJECTED:
         _persist_pre_review_data(job_id, final_state)
         _persist_review_to_db(job_id, final_state)
-        update_job_status_redis(job_id, "auto_rejected")
-        update_job_status_db(job_id, JobStatus.AUTO_REJECTED)
+        update_job_status(job_id, "auto_rejected")
         logger.info(f"Job {job_id}: Auto-rejected by guardrails")
         return {"job_id": job_id, "status": "auto_rejected"}
 
     else:
         # Human rejected
         _persist_review_to_db(job_id, final_state)
-        update_job_status_redis(job_id, "rejected")
-        update_job_status_db(job_id, JobStatus.REJECTED)
+        update_job_status(job_id, "rejected")
         logger.info(f"Job {job_id}: Rejected by human reviewer")
         return {"job_id": job_id, "status": "rejected"}
 
 
 def _persist_review_to_db(job_id: str, state: dict):
     """Persist review decision to the database."""
-    db = SessionLocal()
     try:
-        existing = db.query(StoryReview).filter(
-            StoryReview.job_id == uuid.UUID(job_id)
-        ).first()
-        if not existing:
-            eval_scores = state.get("evaluation_scores") or {}
-            db.add(StoryReview(
-                id=uuid.uuid4(),
-                job_id=uuid.UUID(job_id),
-                reviewer_id=state.get("reviewer_id", ""),
-                decision=state.get("review_decision", "rejected"),
-                comment=state.get("review_comment", ""),
-                guardrail_passed=state.get("guardrail_passed", False),
-                overall_eval_score=eval_scores.get("overall_score"),
-            ))
-            db.commit()
+        with get_sync_db() as db:
+            existing = db.query(StoryReview).filter(
+                StoryReview.job_id == uuid.UUID(job_id)
+            ).first()
+            if not existing:
+                eval_scores = state.get("evaluation_scores") or {}
+                db.add(StoryReview(
+                    id=uuid.uuid4(),
+                    job_id=uuid.UUID(job_id),
+                    reviewer_id=state.get("reviewer_id", ""),
+                    decision=state.get("review_decision", "rejected"),
+                    comment=state.get("review_comment", ""),
+                    guardrail_passed=state.get("guardrail_passed", False),
+                    overall_eval_score=eval_scores.get("overall_score"),
+                ))
+                db.commit()
     except Exception as e:
-        db.rollback()
         logger.error(f"Job {job_id}: Failed to persist review: {e}")
-    finally:
-        db.close()
 
 
-def _persist_story_to_db(
-    job_id: str, story_text: str, story_title: str,
-    image_urls: list, image_metadata: list,
-    video_urls: list, video_metadata: list,
-    state: StoryState
-) -> str:
+def _persist_story_to_db(job_id: str, state: dict) -> str:
     """
     Persist story to database using sync SQLAlchemy.
     Called from Celery context, so we use sync operations.
 
+    If the story was already created during pre-review persistence,
+    updates the media URLs (they may have changed after S3 publish).
+
     Returns:
         story_id as string
     """
-    db = SessionLocal()
-    try:
+    image_urls = state.get("image_urls", [])
+    image_metadata = state.get("image_metadata", [])
+    video_urls = state.get("video_urls", [])
+    video_metadata = state.get("video_metadata", [])
+
+    with get_sync_db() as db:
         job = db.query(StoryJob).filter(StoryJob.id == uuid.UUID(job_id)).first()
         if not job:
             raise StoryGenerationError(f"Job {job_id} not found")
 
         # Check if story already exists (from pre-review persistence)
-        existing_story = db.query(Story).filter(Story.job_id == uuid.UUID(job_id)).first()
+        existing_story = db.query(Story).filter(Story.job_id == job.id).first()
         if existing_story:
-            # Update existing story URLs (may have changed after publish to S3)
-            for idx, (url, metadata) in enumerate(zip(image_urls, image_metadata)):
-                existing_image = db.query(StoryImage).filter(
-                    StoryImage.story_id == existing_story.id,
-                    StoryImage.display_order == idx,
-                ).first()
-                if existing_image:
-                    existing_image.image_url = url
-                else:
-                    db.add(StoryImage(
-                        id=uuid.uuid4(),
-                        story_id=existing_story.id,
-                        image_url=url,
-                        prompt_used=metadata.get("prompt", ""),
-                        scene_description=metadata.get("description", ""),
-                        display_order=idx,
-                    ))
-
-            for idx, (url, metadata) in enumerate(zip(video_urls, video_metadata)):
-                existing_video = db.query(StoryVideo).filter(
-                    StoryVideo.story_id == existing_story.id,
-                    StoryVideo.display_order == idx,
-                ).first()
-                if existing_video:
-                    existing_video.video_url = url
-                else:
-                    db.add(StoryVideo(
-                        id=uuid.uuid4(),
-                        story_id=existing_story.id,
-                        video_url=url,
-                        prompt_used=metadata.get("prompt", ""),
-                        scene_description=metadata.get("description", ""),
-                        display_order=idx,
-                    ))
-
+            # Update existing media URLs (may have changed after publish to S3)
+            _update_media_urls(db, existing_story, image_urls, image_metadata, video_urls, video_metadata)
             db.commit()
             return str(existing_story.id)
 
-        # Create new story
-        story = Story(
-            id=uuid.uuid4(),
-            job_id=job.id,
-            title=story_title or DEFAULT_STORY_TITLE,
-            content=story_text,
-            age_group=state.get("age_group", "6-8"),
-            prompt=state.get("prompt", ""),
-        )
-        db.add(story)
-        db.flush()
+        # Create new story (and media) via shared helper
+        story = _ensure_story_persisted(db, job, state)
+        if story:
+            job.status = JobStatus.PUBLISHED
+            db.commit()
+            db.refresh(story)
+            return str(story.id)
 
-        for idx, (url, metadata) in enumerate(zip(image_urls, image_metadata)):
+        raise StoryGenerationError(f"Job {job_id}: No story text available to persist")
+
+
+def _update_media_urls(db, story, image_urls, image_metadata, video_urls, video_metadata):
+    """Update existing media URLs on a story (e.g. after S3 publish)."""
+    for idx, (url, metadata) in enumerate(zip(image_urls, image_metadata)):
+        existing_image = db.query(StoryImage).filter(
+            StoryImage.story_id == story.id,
+            StoryImage.display_order == idx,
+        ).first()
+        if existing_image:
+            existing_image.image_url = url
+        else:
             db.add(StoryImage(
                 id=uuid.uuid4(),
                 story_id=story.id,
@@ -443,7 +408,14 @@ def _persist_story_to_db(
                 display_order=idx,
             ))
 
-        for idx, (url, metadata) in enumerate(zip(video_urls, video_metadata)):
+    for idx, (url, metadata) in enumerate(zip(video_urls, video_metadata)):
+        existing_video = db.query(StoryVideo).filter(
+            StoryVideo.story_id == story.id,
+            StoryVideo.display_order == idx,
+        ).first()
+        if existing_video:
+            existing_video.video_url = url
+        else:
             db.add(StoryVideo(
                 id=uuid.uuid4(),
                 story_id=story.id,
@@ -453,24 +425,10 @@ def _persist_story_to_db(
                 display_order=idx,
             ))
 
-        job.status = JobStatus.PUBLISHED
-        db.commit()
-        db.refresh(story)
 
-        return str(story.id)
-    finally:
-        db.close()
-
-
-def _send_completion_webhook(
-    webhook_url: str, job_id: str, story_id: str,
-    story_text: str, story_title: str,
-    image_urls: list, image_metadata: list,
-    video_urls: list, video_metadata: list
-) -> None:
+def _send_completion_webhook(webhook_url: str, job_id: str, story_id: str) -> None:
     """Send webhook notification after story is approved and published."""
-    db = SessionLocal()
-    try:
+    with get_sync_db() as db:
         story = db.query(Story).filter(Story.id == uuid.UUID(story_id)).first()
         if not story:
             logger.warning(f"Story {story_id} not found for webhook payload")
@@ -506,5 +464,3 @@ def _send_completion_webhook(
         }
 
         send_webhook_sync(webhook_url, webhook_payload)
-    finally:
-        db.close()

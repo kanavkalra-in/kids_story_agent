@@ -1,6 +1,8 @@
+from contextlib import contextmanager
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from app.config import settings
 
 # Base class for models
@@ -62,3 +64,16 @@ async def get_db() -> AsyncSession:
         except Exception:
             await session.rollback()
             raise
+
+
+@contextmanager
+def get_sync_db() -> Session:
+    """Context manager for getting sync database session (for Celery tasks)."""
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()

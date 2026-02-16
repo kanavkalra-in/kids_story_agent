@@ -1,5 +1,6 @@
 from app.services.openai_client import get_openai_client
 from app.services.s3 import s3_service
+from app.services.storage import save_video_locally
 from app.config import settings
 from app.agents.state import StoryState
 from app.agents.nodes.generation.prompter_utils import StoryGenerationError
@@ -13,26 +14,9 @@ from app.constants import (
 import logging
 import uuid
 import asyncio
-from pathlib import Path
 import httpx
 
 logger = logging.getLogger(__name__)
-
-
-def _save_video_locally(video_data: bytes, story_id: str, video_id: str) -> str:
-    """Save a video to local storage and return the relative file path."""
-    base_storage_path = Path(settings.local_video_storage_path)
-    if not base_storage_path.is_absolute():
-        base_storage_path = Path.cwd() / base_storage_path
-
-    storage_dir = base_storage_path / "stories" / story_id
-    storage_dir.mkdir(parents=True, exist_ok=True)
-
-    video_path = storage_dir / f"{video_id}.mp4"
-    with open(video_path, "wb") as f:
-        f.write(video_data)
-
-    return str(video_path.relative_to(Path.cwd()))
 
 
 async def video_generator_node(state: StoryState) -> dict:
@@ -146,7 +130,7 @@ async def video_generator_node(state: StoryState) -> dict:
 
     if settings.storage_type == "local":
         video_url = await asyncio.to_thread(
-            _save_video_locally, video_data, story_id, video_id_str
+            save_video_locally, video_data, story_id, video_id_str
         )
         logger.info(f"Job {job_id}: Video {video_index + 1} saved locally: {video_url}")
     else:

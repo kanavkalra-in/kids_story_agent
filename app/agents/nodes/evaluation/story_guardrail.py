@@ -1,16 +1,25 @@
 """
-Story Guardrail Node — Text safety checks.
+Story Guardrail Node — Multi-layer text safety checks.
 
-Runs two layers of detection:
-1. Fast regex-based PII scanning (emails, phones, SSNs, credit cards)
-2. LLM-based deep analysis (violence, fear, political, brand, religious)
+Three layers:
+
+Layer 0 — OpenAI Moderation API (fast ~50ms, no LLM cost)
+    Catches: violence, sexual, self-harm, hate, harassment.
+
+Layer 1 — PII Detection (regex)
+    Catches: emails, phone numbers, SSNs, credit card numbers.
+
+Layer 2 — LLM Deep Safety Analysis (custom prompts)
+    Domain-specific kids content: fear intensity, brand mentions,
+    political content, religious references, violence severity.
 
 Produces a list of guardrail violation dicts appended to state via reducer.
 """
 
 from app.agents.state import StoryState
 from app.services.moderation import (
-    detect_pii_regex,
+    check_openai_moderation,
+    detect_pii,
     check_text_safety,
     build_text_violations,
 )
@@ -31,10 +40,16 @@ def story_guardrail_node(state: StoryState) -> dict:
     age_group = state.get("age_group", "6-8")
     violations = []
 
-    logger.info(f"Job {job_id}: Running story text guardrails")
+    logger.info(f"Job {job_id}: Running story text guardrails (3-layer pipeline)")
 
-    # ── Layer 1: Fast regex PII detection ──
-    pii_violations = detect_pii_regex(story_text)
+    # ── Layer 0: OpenAI Moderation API (fast) ──
+    openai_violations = check_openai_moderation(story_text)
+    violations.extend(openai_violations)
+    if openai_violations:
+        logger.warning(f"Job {job_id}: OpenAI Moderation flagged story text")
+
+    # ── Layer 1: PII detection (regex) ──
+    pii_violations = detect_pii(story_text)
     violations.extend(pii_violations)
     if pii_violations:
         logger.warning(f"Job {job_id}: PII detected — {len(pii_violations)} violation(s)")
@@ -49,12 +64,14 @@ def story_guardrail_node(state: StoryState) -> dict:
 
     logger.info(
         f"Job {job_id}: Story guardrail complete — "
-        f"{hard_count} hard, {soft_count} soft violation(s)"
+        f"{hard_count} hard, {soft_count} soft violation(s) "
+        f"(L0:openai={len(openai_violations)}, "
+        f"L1:pii={len(pii_violations)}, "
+        f"L2:llm={len(text_violations)})"
     )
 
     return {
         "guardrail_violations": violations,
-        # Story guardrail doesn't produce media URL finals
         "image_urls_final": [],
         "video_urls_final": [],
     }

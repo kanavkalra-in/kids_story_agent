@@ -1,11 +1,11 @@
 """
-Video Guardrail Node — Prompt moderation + optional frame sampling with retry.
+Video Guardrail Node — Prompt moderation + optional frame sampling with single retry.
 
 For each video, this node:
 1. Runs text guardrails on the original Sora prompt (prompt moderation)
 2. Optionally samples frames and runs image safety checks on them
-3. If a hard violation is found, regenerates the video and re-checks
-4. Repeats up to ``media_guardrail_max_retries`` times
+3. If a hard violation is found, regenerates the video and re-checks once
+4. If the retry also fails, raises StoryGenerationError to fail the graph
 
 Since videos are generated from text prompts (no audio dialogue), "transcript
 moderation" is implemented as prompt moderation — checking the Sora prompt text.
@@ -27,6 +27,7 @@ from app.services.moderation import (
 )
 from app.services.openai_client import get_openai_client
 from app.services.s3 import s3_service
+from app.services.storage import save_video_locally
 from app.config import settings
 from app.constants import (
     SEVERITY_HARD,
@@ -36,25 +37,8 @@ from app.constants import (
     VIDEO_POLL_BACKOFF_MULTIPLIER,
     HTTP_LONG_TIMEOUT,
 )
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-def _save_video_locally(video_data: bytes, story_id: str, video_id: str) -> str:
-    """Save a video to local storage and return the relative file path."""
-    base_storage_path = Path(settings.local_video_storage_path)
-    if not base_storage_path.is_absolute():
-        base_storage_path = Path.cwd() / base_storage_path
-
-    storage_dir = base_storage_path / "stories" / story_id
-    storage_dir.mkdir(parents=True, exist_ok=True)
-
-    video_path = storage_dir / f"{video_id}.mp4"
-    with open(video_path, "wb") as f:
-        f.write(video_data)
-
-    return str(video_path.relative_to(Path.cwd()))
 
 
 async def _regenerate_single_video(prompt: str, job_id: str) -> str:
@@ -114,7 +98,7 @@ async def _regenerate_single_video(prompt: str, job_id: str) -> str:
 
     if settings.storage_type == "local":
         final_url = await asyncio.to_thread(
-            _save_video_locally, video_data, job_id, video_id_str
+            save_video_locally, video_data, job_id, video_id_str
         )
     else:
         final_url = await asyncio.to_thread(
@@ -124,10 +108,39 @@ async def _regenerate_single_video(prompt: str, job_id: str) -> str:
     return final_url
 
 
+async def _check_video_safety(
+    job_id: str, prompt: str, video_index: int, age_group: str,
+) -> list:
+    """Run prompt moderation + frame sampling on a video. Returns violation list."""
+    violations = []
+
+    # 1. Prompt moderation (text guardrails on the Sora prompt)
+    prompt_safety = await check_text_safety_async(prompt, age_group)
+    prompt_violations = build_text_violations(
+        prompt_safety, media_type="video", media_index=video_index,
+    )
+    # Prefix guardrail names to distinguish from story-level violations
+    for v in prompt_violations:
+        v["guardrail_name"] = f"video_prompt_{v['guardrail_name']}"
+    violations.extend(prompt_violations)
+
+    # 2. Frame sampling moderation (if enabled and LLM supports vision)
+    if settings.video_frame_sampling_enabled and settings.llm_provider in ("openai", "anthropic"):
+        logger.warning(
+            f"Job {job_id}: video_frame_sampling_enabled=True but frame extraction is not "
+            f"yet implemented (video {video_index}). Skipping frame-level moderation. "
+            f"Set VIDEO_FRAME_SAMPLING_ENABLED=false to suppress this warning."
+        )
+        # TODO: Implement frame extraction with ffmpeg when video processing is available.
+
+    return violations
+
+
 async def video_guardrail_with_retry_node(state: StoryState) -> dict:
     """
     Check a single video via prompt moderation and optional frame sampling.
-    If hard violation found, regenerate and re-check up to max_retries times.
+    If hard violation found, regenerate once and re-check. If the retry
+    also fails, raise StoryGenerationError to fail the entire graph.
 
     Invoked via LangGraph ``Send`` with:
     - ``_guardrail_media_url``: URL of the video
@@ -139,76 +152,50 @@ async def video_guardrail_with_retry_node(state: StoryState) -> dict:
     video_index = state.get("_guardrail_media_index", 0)
     original_prompt = state.get("_guardrail_original_prompt", "")
     age_group = state.get("age_group", "6-8")
-    max_retries = settings.media_guardrail_max_retries
 
-    all_violations = []
+    # ── Attempt 1: Check original video ──
+    logger.info(f"Job {job_id}: Checking video {video_index} safety (attempt 1/2)")
 
-    for attempt in range(max_retries + 1):
-        attempt_violations = []
+    violations = await _check_video_safety(job_id, original_prompt, video_index, age_group)
+    hard_violations = [v for v in violations if v["severity"] == SEVERITY_HARD]
 
+    if not hard_violations:
         logger.info(
-            f"Job {job_id}: Checking video {video_index} safety "
-            f"(attempt {attempt + 1}/{max_retries + 1})"
+            f"Job {job_id}: Video {video_index} passed guardrails "
+            f"({len(violations)} soft warnings)"
         )
+        return {
+            "guardrail_violations": violations,
+            "video_urls_final": [{"index": video_index, "url": video_url}],
+            "image_urls_final": [],
+        }
 
-        # ── 1. Prompt moderation (text guardrails on the Sora prompt) ──
-        prompt_safety = await check_text_safety_async(original_prompt, age_group)
-        prompt_violations = build_text_violations(
-            prompt_safety,
-            media_type="video",
-            media_index=video_index,
-        )
-        # Prefix guardrail names to distinguish from story-level violations
-        for v in prompt_violations:
-            v["guardrail_name"] = f"video_prompt_{v['guardrail_name']}"
-        attempt_violations.extend(prompt_violations)
-
-        # ── 2. Frame sampling moderation (if enabled and LLM supports vision) ──
-        if settings.video_frame_sampling_enabled and settings.llm_provider in ("openai", "anthropic"):
-            logger.debug(
-                f"Job {job_id}: Frame sampling moderation for video {video_index} "
-                f"(sampling {settings.video_sample_frames} frames)"
-            )
-            # Frame sampling would require a video processing library (e.g., opencv/ffmpeg).
-            # For now, prompt moderation provides the primary safety check.
-            # TODO: Implement frame extraction with ffmpeg when video processing is available.
-
-        hard_violations = [v for v in attempt_violations if v["severity"] == SEVERITY_HARD]
-
-        if not hard_violations:
-            logger.info(
-                f"Job {job_id}: Video {video_index} passed guardrails "
-                f"(attempt {attempt + 1}, {len(attempt_violations)} soft warnings)"
-            )
-            return {
-                "guardrail_violations": attempt_violations,
-                "video_urls_final": [{"index": video_index, "url": video_url}],
-                "image_urls_final": [],
-            }
-
-        # Hard violation — regenerate if retries left
-        all_violations.extend(attempt_violations)
-
-        if attempt < max_retries:
-            logger.warning(
-                f"Job {job_id}: Video {video_index} prompt failed guardrails "
-                f"({len(hard_violations)} hard violations), regenerating..."
-            )
-            try:
-                video_url = await _regenerate_single_video(original_prompt, job_id)
-                logger.info(f"Job {job_id}: Video {video_index} regenerated → {video_url}")
-            except Exception as e:
-                logger.error(
-                    f"Job {job_id}: Video {video_index} regeneration failed: {e}"
-                )
-                break
-
-    logger.error(
-        f"Job {job_id}: Video {video_index} failed after {max_retries + 1} attempts "
-        f"({len(all_violations)} total violations)"
+    # ── Attempt 2: Regenerate and re-check (single retry) ──
+    logger.warning(
+        f"Job {job_id}: Video {video_index} failed guardrails "
+        f"({len(hard_violations)} hard violations), regenerating..."
     )
-    return {
-        "guardrail_violations": all_violations,
-        "video_urls_final": [{"index": video_index, "url": video_url}],
-        "image_urls_final": [],
-    }
+    video_url = await _regenerate_single_video(original_prompt, job_id)
+    logger.info(f"Job {job_id}: Video {video_index} regenerated → {video_url}")
+
+    logger.info(f"Job {job_id}: Checking video {video_index} safety (attempt 2/2)")
+    retry_violations = await _check_video_safety(job_id, original_prompt, video_index, age_group)
+    hard_violations = [v for v in retry_violations if v["severity"] == SEVERITY_HARD]
+
+    if not hard_violations:
+        logger.info(
+            f"Job {job_id}: Video {video_index} passed guardrails on retry "
+            f"({len(retry_violations)} soft warnings)"
+        )
+        return {
+            "guardrail_violations": retry_violations,
+            "video_urls_final": [{"index": video_index, "url": video_url}],
+            "image_urls_final": [],
+        }
+
+    # ── Retry failed — fail the entire graph ──
+    raise StoryGenerationError(
+        f"Video {video_index} failed guardrails after retry. "
+        f"{len(hard_violations)} hard violation(s): "
+        f"{'; '.join(v['detail'] for v in hard_violations)}"
+    )

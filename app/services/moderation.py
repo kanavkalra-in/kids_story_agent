@@ -1,10 +1,24 @@
 """
 Shared moderation utilities used by guardrail nodes.
 
-Provides:
-- Regex-based PII detection (fast, no API cost)
-- LLM-based text safety analysis
-- Vision-based image safety analysis (via existing LLM or OpenAI omni-moderation fallback)
+Three layers of safety analysis, one standard framework:
+
+Layer 0 — OpenAI Moderation API (fast, ~50ms, no LLM cost)
+    Uses OpenAI's native ``omni-moderation-latest`` endpoint.
+    The only external guardrail framework. Runs on both input prompts
+    and generated story text.
+    Catches: violence, sexual, self-harm, hate, harassment.
+
+Layer 1 — PII Detection (regex)
+    Fast regex-based detection for emails, phones, SSNs, credit cards.
+    Zero dependencies, zero latency.
+
+Layer 2 — LLM Deep Safety Analysis
+    Custom prompts with ``with_structured_output()`` for domain-specific
+    kids content checks (fear intensity, brand mentions, religious refs, etc.)
+
+Also provides:
+- Vision-based image safety analysis via LLM or omni-moderation
 """
 
 import re
@@ -80,13 +94,87 @@ Be thorough and strict. Score confidence from 0.0 (definitely not present) to 1.
 If the image is in a cartoon/illustration style and is generally wholesome, mark is_safe_for_children as true."""
 
 
-# ── PII Detection (regex-based, fast) ──
+# ═══════════════════════════════════════════════════════════════════════════
+# Layer 0: OpenAI Moderation API
+# ═══════════════════════════════════════════════════════════════════════════
 
 
-def detect_pii_regex(text: str) -> List[dict]:
+def check_openai_moderation(text: str) -> List[dict]:
     """
-    Fast regex-based PII detection. Returns a list of violation dicts.
-    No API calls — pure string matching.
+    Fast pre-filter using OpenAI's native Moderation API.
+
+    Catches violence, sexual, self-harm, hate, and harassment categories.
+    Returns a list of guardrail violation dicts (empty if text is safe).
+    Raises on API errors.
+    """
+    if not settings.enable_openai_moderation:
+        return []
+
+    from app.services.openai_client import get_openai_client
+
+    client = get_openai_client()
+    moderation = client.moderations.create(
+        model="omni-moderation-latest",
+        input=text,
+    )
+    result = moderation.results[0]
+    categories = result.categories
+    scores = result.category_scores
+
+    violations = []
+    flagged_cats = []
+
+    # Maps display name → Python attribute name on the moderation result
+    category_checks = {
+        "harassment": "harassment",
+        "harassment/threatening": "harassment_threatening",
+        "hate": "hate",
+        "hate/threatening": "hate_threatening",
+        "self-harm": "self_harm",
+        "self-harm/intent": "self_harm_intent",
+        "sexual": "sexual",
+        "sexual/minors": "sexual_minors",
+        "violence": "violence",
+        "violence/graphic": "violence_graphic",
+    }
+
+    for cat_name, attr_name in category_checks.items():
+        is_flagged = getattr(categories, attr_name, False)
+        score = getattr(scores, attr_name, 0.0)
+
+        if is_flagged:
+            flagged_cats.append(f"{cat_name}({score:.2f})")
+
+    if flagged_cats:
+        logger.warning(
+            f"OpenAI Moderation FLAGGED: {', '.join(flagged_cats)}"
+        )
+        violations.append({
+            "guardrail_name": "openai_moderation",
+            "media_type": "story",
+            "media_index": None,
+            "severity": SEVERITY_HARD,
+            "confidence": 1.0,
+            "detail": f"OpenAI Moderation API flagged: {', '.join(flagged_cats)}",
+        })
+
+    return violations
+
+
+async def check_openai_moderation_async(text: str) -> List[dict]:
+    """Async wrapper around check_openai_moderation."""
+    return await asyncio.to_thread(check_openai_moderation, text)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Layer 1: PII Detection (regex)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def detect_pii(text: str) -> List[dict]:
+    """
+    Regex-based PII detection. Returns a list of violation dicts.
+    Covers: emails, phone numbers, SSNs, credit card numbers.
     """
     violations = []
     for pii_type, pattern in PII_PATTERNS.items():
@@ -103,13 +191,14 @@ def detect_pii_regex(text: str) -> List[dict]:
     return violations
 
 
-# ── Text Safety Analysis (via existing LLM) ──
+# ═══════════════════════════════════════════════════════════════════════════
+# Layer 2: LLM Deep Safety Analysis
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def check_text_safety(text: str, age_group: str = "6-8") -> TextSafetyOutput:
     """
-    Analyze text for safety concerns using the existing configured LLM.
-    Synchronous — call from sync nodes or wrap in asyncio.to_thread.
+    Analyze text for safety concerns using the configured LLM.
     """
     from app.services.llm import get_llm
 
@@ -127,13 +216,14 @@ async def check_text_safety_async(text: str, age_group: str = "6-8") -> TextSafe
     return await asyncio.to_thread(check_text_safety, text, age_group)
 
 
-# ── Image Safety Analysis (via existing Vision LLM or omni-moderation fallback) ──
+# ═══════════════════════════════════════════════════════════════════════════
+# Image Safety Analysis
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def check_image_safety(image_url: str, age_group: str = "6-8") -> ImageSafetyOutput:
     """
-    Check image safety using the existing LLM with vision support.
-    Falls back to OpenAI omni-moderation if the LLM doesn't support vision (e.g., Ollama).
+    Check image safety using LLM vision or omni-moderation API.
     """
     if settings.llm_provider in ("openai", "anthropic"):
         return _check_image_via_vision_llm(image_url, age_group)
@@ -163,47 +253,43 @@ def _check_image_via_vision_llm(image_url: str, age_group: str) -> ImageSafetyOu
 
 
 def _check_image_via_omni_moderation(image_url: str) -> ImageSafetyOutput:
-    """Fallback: OpenAI omni-moderation API for LLMs without vision support."""
+    """OpenAI omni-moderation API for LLMs without vision support."""
     from app.services.openai_client import get_openai_client
 
-    try:
-        client = get_openai_client()
-        moderation = client.moderations.create(
-            model="omni-moderation-latest",
-            input=[{"type": "image_url", "image_url": {"url": image_url}}],
-        )
-        result = moderation.results[0]
-        cats = result.categories
-        scores = result.category_scores
+    client = get_openai_client()
+    moderation = client.moderations.create(
+        model="omni-moderation-latest",
+        input=[{"type": "image_url", "image_url": {"url": image_url}}],
+    )
+    result = moderation.results[0]
+    cats = result.categories
+    scores = result.category_scores
 
-        return ImageSafetyOutput(
-            nsfw_detected=getattr(cats, "sexual", False) or getattr(cats, "sexual/minors", False),
-            nsfw_confidence=max(
-                getattr(scores, "sexual", 0.0),
-                getattr(scores, "sexual/minors", 0.0),
-            ),
-            weapon_detected=getattr(cats, "violence", False),
-            weapon_confidence=getattr(scores, "violence", 0.0),
-            realistic_human_child=False,
-            realistic_child_confidence=0.0,
-            horror_elements=getattr(cats, "violence/graphic", False),
-            horror_confidence=getattr(scores, "violence/graphic", 0.0),
-            is_safe_for_children=not any([
-                getattr(cats, "sexual", False),
-                getattr(cats, "violence", False),
-                getattr(cats, "violence/graphic", False),
-                getattr(cats, "sexual/minors", False),
-            ]),
-            explanation="Checked via OpenAI omni-moderation API",
-        )
-    except Exception as e:
-        logger.error(f"Omni-moderation fallback failed: {e}")
-        # If moderation API fails, flag as unsafe to be safe
-        return ImageSafetyOutput(
-            nsfw_detected=False,
-            is_safe_for_children=True,
-            explanation=f"Moderation API unavailable: {e}. Defaulting to safe.",
-        )
+    return ImageSafetyOutput(
+        nsfw_detected=getattr(cats, "sexual", False) or getattr(cats, "sexual_minors", False),
+        nsfw_confidence=max(
+            getattr(scores, "sexual", 0.0),
+            getattr(scores, "sexual_minors", 0.0),
+        ),
+        weapon_detected=getattr(cats, "violence", False),
+        weapon_confidence=getattr(scores, "violence", 0.0),
+        realistic_human_child=False,
+        realistic_child_confidence=0.0,
+        horror_elements=getattr(cats, "violence_graphic", False),
+        horror_confidence=getattr(scores, "violence_graphic", 0.0),
+        is_safe_for_children=not any([
+            getattr(cats, "sexual", False),
+            getattr(cats, "violence", False),
+            getattr(cats, "violence_graphic", False),
+            getattr(cats, "sexual_minors", False),
+        ]),
+        explanation="Checked via OpenAI omni-moderation API",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Violation Builders
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def build_text_violations(

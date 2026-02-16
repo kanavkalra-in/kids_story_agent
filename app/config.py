@@ -65,8 +65,11 @@ class Settings(BaseSettings):
     # ── Guardrail Settings ──
     guardrail_fear_threshold: float = 0.4              # 0–1, above this triggers violation
     guardrail_violence_hard_threshold: float = 0.6     # above = hard fail, below = soft warning
-    media_guardrail_max_retries: int = 2               # max regeneration retries per image/video
+    media_guardrail_max_retries: int = 1               # max regeneration retries per image/video
     guardrail_auto_reject_on_hard_fail: bool = True    # skip human review for hard violations
+
+    # ── OpenAI Moderation API ──
+    enable_openai_moderation: bool = True               # OpenAI Moderation API pre-filter (input + output)
 
     # ── Video Guardrail Settings ──
     video_frame_sampling_enabled: bool = True

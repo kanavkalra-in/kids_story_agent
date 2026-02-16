@@ -59,10 +59,11 @@ def assembler_node(state: StoryState) -> dict:
     # the generator embedded in metadata so the assembler writes the correct
     # display_order to the database.
     if image_urls:
-        assert len(image_metadata) == len(image_urls), (
-            f"Image URLs and metadata count mismatch: {len(image_urls)} URLs, "
-            f"{len(image_metadata)} metadata entries"
-        )
+        if len(image_metadata) != len(image_urls):
+            raise StoryGenerationError(
+                f"Image URLs and metadata count mismatch: {len(image_urls)} URLs, "
+                f"{len(image_metadata)} metadata entries"
+            )
         paired = sorted(
             zip(image_urls, image_metadata),
             key=lambda pair: pair[1].get("image_index", 0),
@@ -71,10 +72,11 @@ def assembler_node(state: StoryState) -> dict:
         image_metadata = [m for _, m in paired]
 
     if video_urls:
-        assert len(video_metadata) == len(video_urls), (
-            f"Video URLs and metadata count mismatch: {len(video_urls)} URLs, "
-            f"{len(video_metadata)} metadata entries"
-        )
+        if len(video_metadata) != len(video_urls):
+            raise StoryGenerationError(
+                f"Video URLs and metadata count mismatch: {len(video_urls)} URLs, "
+                f"{len(video_metadata)} metadata entries"
+            )
         paired = sorted(
             zip(video_urls, video_metadata),
             key=lambda pair: pair[1].get("video_index", 0),
