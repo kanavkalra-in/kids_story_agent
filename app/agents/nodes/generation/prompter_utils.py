@@ -65,7 +65,10 @@ def generate_media_prompts(
     
     story_text = state.get("story_text", "")
     
-    logger.info(f"Job {job_id}: Generating {num_items} {media_type} prompts from story (length: {len(story_text)} chars)")
+    logger.info(
+        f"Job {job_id}: [PROMPTER_UTILS] Generating {num_items} {media_type} prompt(s) from story "
+        f"(length: {len(story_text)} chars). num_items parameter={num_items}"
+    )
     
     if not story_text:
         error_msg = f"No story text available for {media_type} prompt generation"
@@ -75,6 +78,13 @@ def generate_media_prompts(
     # Format prompts
     system_prompt = system_prompt_template
     user_prompt = user_prompt_template.format(num_items=num_items, story_text=story_text)
+    
+    # Log the exact prompt being sent to LLM for debugging
+    logger.info(
+        f"Job {job_id}: [PROMPTER_UTILS] Sending to LLM - num_items={num_items}, "
+        f"user_prompt contains '{{num_items}}' = {num_items} times. "
+        f"Prompt preview: {user_prompt[:200]}..."
+    )
     
     messages = [
         SystemMessage(content=system_prompt),
@@ -91,14 +101,32 @@ def generate_media_prompts(
     # with LangGraph's checkpointer. Extract data before any state operations.
     scenes = output.scenes
     
+    logger.info(
+        f"Job {job_id}: [PROMPTER_UTILS] LLM returned {len(scenes)} {media_type} scene(s), "
+        f"expected {num_items}"
+    )
+    
     # Validate we got the right number of scenes
     if len(scenes) < num_items:
         error_msg = f"Only generated {len(scenes)} {media_type} scenes, expected {num_items}. LLM did not generate enough scenes."
         logger.error(f"Job {job_id}: {error_msg}")
         raise StoryGenerationError(error_msg)
     elif len(scenes) > num_items:
-        logger.info(f"Job {job_id}: Generated {len(scenes)} {media_type} scenes, truncating to {num_items}")
+        # This is a critical error - the LLM ignored our explicit instructions
+        # We truncate but log as ERROR to make it visible
+        logger.error(
+            f"Job {job_id}: [PROMPTER_UTILS] CRITICAL: LLM generated {len(scenes)} {media_type} scene(s) "
+            f"when EXACTLY {num_items} was requested. This is a bug - the LLM ignored explicit instructions. "
+            f"Truncating to {num_items}, but this should not happen. "
+            f"First scene preview: {scenes[0].description[:100] if scenes else 'N/A'}..."
+        )
         scenes = scenes[:num_items]
+    
+    # Final validation - ensure we have exactly the right number after truncation
+    if len(scenes) != num_items:
+        error_msg = f"After processing, have {len(scenes)} {media_type} scenes but expected {num_items}. This should not happen."
+        logger.error(f"Job {job_id}: {error_msg}")
+        raise StoryGenerationError(error_msg)
     
     # Extract prompts and descriptions as separate parallel lists.
     # Convert to plain strings immediately to ensure no Pydantic model references remain.
@@ -110,7 +138,10 @@ def generate_media_prompts(
     # Explicitly clear the Pydantic model reference to prevent serialization issues
     del output
     
-    logger.info(f"Job {job_id}: Successfully generated {len(prompts)} {media_type} prompts")
+    logger.info(
+        f"Job {job_id}: [PROMPTER_UTILS] Returning {len(prompts)} {media_type} prompt(s) "
+        f"(expected {num_items}). Prompts: {[p[:50] + '...' if len(p) > 50 else p for p in prompts]}"
+    )
     
     return {
         f"{media_type}_prompts": prompts,

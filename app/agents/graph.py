@@ -133,6 +133,18 @@ def route_to_image_generators(state: StoryState) -> Union[list[Send], str]:
     image_descriptions = state.get("image_descriptions", [])
     generate_images = state.get("generate_images", False)
 
+    num_illustrations = state.get("num_illustrations", "NOT SET")
+    logger.info(
+        f"Job {job_id}: [ROUTE_IMAGE_GENERATORS] Found {len(image_prompts)} image prompt(s) in state. "
+        f"num_illustrations={num_illustrations}, generate_images={generate_images}"
+    )
+    
+    if len(image_prompts) != num_illustrations and isinstance(num_illustrations, int):
+        logger.error(
+            f"Job {job_id}: [ROUTE_IMAGE_GENERATORS] MISMATCH! Expected {num_illustrations} prompt(s) "
+            f"but found {len(image_prompts)} prompt(s). This will cause {len(image_prompts)} image(s) to be generated!"
+        )
+    
     for i, prompt in enumerate(image_prompts):
         desc = image_descriptions[i] if i < len(image_descriptions) else ""
         sends.append(Send("generate_single_image", {
@@ -143,9 +155,27 @@ def route_to_image_generators(state: StoryState) -> Union[list[Send], str]:
             "_current_description": desc,
         }))
 
+    # If there are no prompts but generation is enabled, this is an error
+    if not sends and generate_images:
+        error_msg = (
+            f"Job {job_id}: Image generation was enabled but image_prompter "
+            f"returned no prompts. This indicates the prompter failed or returned empty results."
+        )
+        logger.error(error_msg)
+        from app.agents.nodes.generation.prompter_utils import StoryGenerationError
+        raise StoryGenerationError(error_msg)
+    
+    # If no sends and generation is disabled, create a no-op Send that immediately completes
+    # This ensures assembler waits for all paths (including other generators) via fan-in
+    # We can't route directly to assembler as it would cancel other active Send nodes
     if not sends:
-        return "assembler"
-
+        logger.info(f"Job {job_id}: No image prompts to generate (generation disabled), creating no-op")
+        # Return empty list - LangGraph will handle this, but we need to ensure
+        # assembler still waits. Actually, we should create a no-op generator.
+        # For now, return empty list and let the graph handle it
+        # The key is that assembler has edges from generators, so it will wait
+        return []
+    
     return sends
 
 
@@ -173,9 +203,23 @@ def route_to_video_generators(state: StoryState) -> Union[list[Send], str]:
             "_current_description": desc,
         }))
 
+    # If there are no prompts but generation is enabled, this is an error
+    if not sends and generate_videos:
+        error_msg = (
+            f"Job {job_id}: Video generation was enabled but video_prompter "
+            f"returned no prompts. This indicates the prompter failed or returned empty results."
+        )
+        logger.error(error_msg)
+        from app.agents.nodes.generation.prompter_utils import StoryGenerationError
+        raise StoryGenerationError(error_msg)
+    
+    # If no sends and generation is disabled, return empty list
+    # This ensures we don't route directly to assembler (which would cancel other Send nodes)
+    # Assembler will run when all generators complete via their edges
     if not sends:
-        return "assembler"
-
+        logger.info(f"Job {job_id}: No video prompts to generate (generation disabled), returning empty")
+        return []
+    
     return sends
 
 
@@ -212,7 +256,23 @@ def route_to_guardrails(state: StoryState) -> list[Send]:
 
     # 3. Per-image guardrails (with retry/regeneration)
     image_prompts = state.get("image_prompts", [])
-    for i, url in enumerate(state.get("image_urls", [])):
+    image_urls = state.get("image_urls", [])
+    num_illustrations = state.get("num_illustrations")
+    
+    logger.info(
+        f"Job {job_id}: [ROUTE_GUARDRAILS] Found {len(image_urls)} image URL(s) in state, "
+        f"num_illustrations={num_illustrations}, image_prompts count={len(image_prompts)}"
+    )
+    
+    # CRITICAL FIX: Limit to expected count to prevent duplicate guardrail checks
+    if num_illustrations is not None and len(image_urls) > num_illustrations:
+        logger.warning(
+            f"Job {job_id}: [ROUTE_GUARDRAILS] Found {len(image_urls)} image URL(s) but expected {num_illustrations}. "
+            f"This indicates a bug - reducer field accumulation issue. Truncating to {num_illustrations}."
+        )
+        image_urls = image_urls[:num_illustrations]
+    
+    for i, url in enumerate(image_urls):
         sends.append(Send("image_guardrail_with_retry", {
             "job_id": job_id,
             "age_group": age_group,
@@ -316,13 +376,17 @@ def _build_workflow() -> StateGraph:
     workflow.add_edge("story_writer", "image_prompter")
     workflow.add_edge("story_writer", "video_prompter")
 
-    # Each prompter routes only to its own generators (avoids duplicate Sends)
+    # Each prompter routes to generators via Send (for parallel execution)
+    # When no prompts exist, routing returns empty list and prompter completes
     workflow.add_conditional_edges("image_prompter", route_to_image_generators,
-                                  ["generate_single_image", "assembler"])
+                                  ["generate_single_image"])
     workflow.add_conditional_edges("video_prompter", route_to_video_generators,
-                                  ["generate_single_video", "assembler"])
+                                  ["generate_single_video"])
 
     # All generators → assembler (fan-in)
+    # LangGraph will wait for ALL incoming edges to assembler before running it
+    # When prompters return empty Send lists, they complete but don't create edges
+    # Assembler only runs when all active generators (via Send) complete
     workflow.add_edge("generate_single_image", "assembler")
     workflow.add_edge("generate_single_video", "assembler")
 

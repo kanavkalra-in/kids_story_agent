@@ -106,6 +106,11 @@ async def _generate_story_async(job_id: str, task_id: str) -> dict[str, Any]:
         generate_videos = job.generate_videos
         webhook_url = job.webhook_url
 
+    logger.info(
+        f"Job {job_id}: Loaded from DB - num_illustrations={num_illustrations}, "
+        f"generate_images={generate_images}, generate_videos={generate_videos}"
+    )
+
     # Prepare initial state for LangGraph
     initial_state: StoryState = {
         "job_id": job_id,
@@ -228,7 +233,39 @@ def _ensure_story_persisted(db, job, state: dict):
     db.flush()
 
     image_metadata = state.get("image_metadata", [])
-    for idx, url in enumerate(state.get("image_urls", [])):
+    expected_images = state.get("num_illustrations", 0)
+    
+    # CRITICAL FIX: After guardrail aggregator, use image_urls_final (final URLs from guardrails)
+    # instead of image_urls (which may have duplicates due to reducer field accumulation).
+    # image_urls_final format: [{"index": 0, "url": "..."}, ...]
+    image_urls_final = state.get("image_urls_final", [])
+    if image_urls_final:
+        # Use final URLs from guardrails (sorted by index)
+        image_urls_final_sorted = sorted(image_urls_final, key=lambda x: x.get("index", 0))
+        image_urls = [item["url"] for item in image_urls_final_sorted]
+        logger.info(
+            f"Job {job.id}: Using image_urls_final ({len(image_urls)} URLs) for persistence "
+            f"(after guardrails)"
+        )
+    else:
+        # Fallback to image_urls (before guardrails)
+        image_urls = state.get("image_urls", [])
+        logger.info(
+            f"Job {job.id}: Using image_urls ({len(image_urls)} URLs) for persistence "
+            f"(before guardrails, image_urls_final not available)"
+        )
+    
+    # Limit to expected count to prevent duplicates
+    if expected_images > 0 and len(image_urls) > expected_images:
+        logger.warning(
+            f"Job {job.id}: Found {len(image_urls)} image URLs but expected {expected_images}. "
+            f"Truncating to {expected_images}."
+        )
+        image_urls = image_urls[:expected_images]
+        image_metadata = image_metadata[:expected_images] if len(image_metadata) >= expected_images else image_metadata
+    
+    # Ensure we only create the expected number of images
+    for idx, url in enumerate(image_urls[:expected_images] if expected_images > 0 else image_urls):
         metadata = image_metadata[idx] if idx < len(image_metadata) else {}
         db.add(StoryImage(
             id=uuid.uuid4(),
@@ -383,9 +420,23 @@ def _persist_story_to_db(job_id: str, state: dict) -> str:
     Returns:
         story_id as string
     """
-    image_urls = state.get("image_urls", [])
+    # CRITICAL FIX: After guardrail aggregator, use image_urls_final instead of image_urls
+    # to avoid duplicates from reducer field accumulation
+    image_urls_final = state.get("image_urls_final", [])
+    if image_urls_final:
+        image_urls_final_sorted = sorted(image_urls_final, key=lambda x: x.get("index", 0))
+        image_urls = [item["url"] for item in image_urls_final_sorted]
+    else:
+        image_urls = state.get("image_urls", [])
+    
+    video_urls_final = state.get("video_urls_final", [])
+    if video_urls_final:
+        video_urls_final_sorted = sorted(video_urls_final, key=lambda x: x.get("index", 0))
+        video_urls = [item["url"] for item in video_urls_final_sorted]
+    else:
+        video_urls = state.get("video_urls", [])
+    
     image_metadata = state.get("image_metadata", [])
-    video_urls = state.get("video_urls", [])
     video_metadata = state.get("video_metadata", [])
 
     with get_sync_db() as db:
@@ -414,6 +465,34 @@ def _persist_story_to_db(job_id: str, state: dict) -> str:
 
 def _update_media_urls(db, story, image_urls, image_metadata, video_urls, video_metadata):
     """Update existing media URLs on a story (e.g. after S3 publish)."""
+    # Get the expected count from the job
+    job = db.query(StoryJob).filter(StoryJob.id == story.job_id).first()
+    expected_images = job.num_illustrations if job else len(image_urls)
+    
+    # Limit to expected count to prevent duplicates
+    if len(image_urls) > expected_images:
+        logger.warning(
+            f"Job {job.id if job else 'unknown'}: "
+            f"Found {len(image_urls)} image URLs but expected {expected_images}. "
+            f"Truncating to {expected_images}."
+        )
+        image_urls = image_urls[:expected_images]
+        image_metadata = image_metadata[:expected_images] if len(image_metadata) >= expected_images else image_metadata
+    
+    # Delete any extra images that exceed the expected count
+    existing_images = db.query(StoryImage).filter(
+        StoryImage.story_id == story.id
+    ).order_by(StoryImage.display_order).all()
+    
+    if len(existing_images) > expected_images:
+        logger.warning(
+            f"Job {job.id if job else 'unknown'}: "
+            f"Found {len(existing_images)} existing images but expected {expected_images}. "
+            f"Deleting {len(existing_images) - expected_images} extra image(s)."
+        )
+        for extra_image in existing_images[expected_images:]:
+            db.delete(extra_image)
+    
     for idx, (url, metadata) in enumerate(zip(image_urls, image_metadata)):
         existing_image = db.query(StoryImage).filter(
             StoryImage.story_id == story.id,
@@ -421,6 +500,8 @@ def _update_media_urls(db, story, image_urls, image_metadata, video_urls, video_
         ).first()
         if existing_image:
             existing_image.image_url = url
+            existing_image.prompt_used = metadata.get("prompt", "")
+            existing_image.scene_description = metadata.get("description", "")
         else:
             db.add(StoryImage(
                 id=uuid.uuid4(),

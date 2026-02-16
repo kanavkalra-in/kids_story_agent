@@ -39,6 +39,21 @@ def guardrail_aggregator_node(state: StoryState) -> dict:
         state.get("video_urls_final", []),
         key=lambda x: x.get("index", 0),
     )
+    
+    # Validate count matches expected number of illustrations
+    expected_count = state.get("num_illustrations")
+    if expected_count is not None:
+        if len(image_finals) > expected_count:
+            logger.warning(
+                f"Job {job_id}: Guardrail aggregator found {len(image_finals)} image(s) "
+                f"but expected {expected_count}. Truncating to {expected_count}."
+            )
+            image_finals = image_finals[:expected_count]
+        elif len(image_finals) < expected_count:
+            logger.warning(
+                f"Job {job_id}: Guardrail aggregator found {len(image_finals)} image(s) "
+                f"but expected {expected_count}. This may indicate missing guardrail outputs."
+            )
 
     # Build human-readable summary
     summary_parts = []
@@ -105,11 +120,30 @@ def guardrail_aggregator_node(state: StoryState) -> dict:
 
     logger.info(f"Job {job_id}: [Aggregator] Full summary:\n{chr(10).join(summary_parts)}")
 
+    # CRITICAL FIX: image_urls and video_urls are reducer fields.
+    # When we return them, LangGraph will ADD them to existing state (not replace).
+    # This causes duplicates - e.g., if state has [url1] and we return [url1],
+    # it becomes [url1, url1].
+    #
+    # The solution: Don't return reducer fields from the aggregator.
+    # The final URLs are already in image_urls_final/video_urls_final (reducer fields
+    # populated by guardrail nodes). For database persistence, we'll read from
+    # image_urls_final instead of image_urls.
+    #
+    # However, we need the final URLs for later nodes. The proper solution is to
+    # use non-reducer fields, but that would require changing the state schema.
+    # For now, we'll NOT return them and let the persistence layer read from
+    # image_urls_final instead.
+    
+    logger.info(
+        f"Job {job_id}: [Aggregator] Final URLs - {len(image_finals)} images, {len(video_finals)} videos. "
+        f"These are in image_urls_final/video_urls_final. NOT returning image_urls/video_urls "
+        f"to avoid reducer field duplication."
+    )
+    
     return {
         "guardrail_passed": passed,
         "guardrail_summary": "\n".join(summary_parts),
-        # Overwrite image/video URLs with post-guardrail final URLs
-        # (these may differ from originals if images were regenerated)
-        "image_urls": [item["url"] for item in image_finals],
-        "video_urls": [item["url"] for item in video_finals],
+        # Do NOT return image_urls/video_urls - they are reducer fields and would be added
+        # instead of replaced, causing duplicates. The final URLs are in image_urls_final.
     }

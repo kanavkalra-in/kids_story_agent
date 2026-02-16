@@ -257,11 +257,44 @@ async def check_image_safety_async(image_url: str, age_group: str = "6-8") -> Im
 def _check_image_via_vision_llm(image_url: str, age_group: str) -> ImageSafetyOutput:
     """Use the existing LLM (GPT-4o / Claude) with vision input."""
     from app.services.llm import get_llm
+    from pathlib import Path
+    import base64
+
+    # Convert local file paths to base64 data URLs for vision API
+    # Vision APIs (OpenAI/Anthropic) can accept either HTTP URLs or base64 data URLs
+    actual_image_url = image_url
+    if not image_url.startswith(("http://", "https://", "data:")):
+        # It's a local file path - read it and convert to base64
+        try:
+            file_path = Path(image_url)
+            if not file_path.is_absolute():
+                # Make it absolute relative to current working directory
+                file_path = Path.cwd() / file_path
+            
+            if file_path.exists() and file_path.is_file():
+                # Read file and encode as base64
+                image_data = file_path.read_bytes()
+                base64_data = base64.b64encode(image_data).decode('utf-8')
+                # Determine MIME type from extension
+                mime_type = "image/png"  # default
+                if file_path.suffix.lower() in ['.jpg', '.jpeg']:
+                    mime_type = "image/jpeg"
+                elif file_path.suffix.lower() == '.gif':
+                    mime_type = "image/gif"
+                elif file_path.suffix.lower() == '.webp':
+                    mime_type = "image/webp"
+                
+                actual_image_url = f"data:{mime_type};base64,{base64_data}"
+                logger.debug(f"[ImageSafety] Converted local path to base64 data URL: {image_url} → data:{mime_type};base64,...")
+            else:
+                logger.warning(f"[ImageSafety] Local file not found: {image_url}, trying as-is")
+        except Exception as e:
+            logger.warning(f"[ImageSafety] Failed to read local file {image_url}: {e}, trying as-is")
 
     system_prompt = IMAGE_SAFETY_SYSTEM_PROMPT.format(age_group=age_group)
     logger.info(
         f"[ImageSafety] Prompt → system: {system_prompt[:200]}... | "
-        f"image_url: {image_url}"
+        f"image_url: {image_url} (converted: {actual_image_url[:100] if actual_image_url != image_url else 'same'})"
     )
 
     llm = get_llm()
@@ -270,7 +303,7 @@ def _check_image_via_vision_llm(image_url: str, age_group: str) -> ImageSafetyOu
         SystemMessage(content=system_prompt),
         HumanMessage(content=[
             {"type": "text", "text": "Analyze this image for children's content safety:"},
-            {"type": "image_url", "image_url": {"url": image_url}},
+            {"type": "image_url", "image_url": {"url": actual_image_url}},
         ]),
     ])
 
@@ -289,15 +322,47 @@ def _check_image_via_vision_llm(image_url: str, age_group: str) -> ImageSafetyOu
 def _check_image_via_omni_moderation(image_url: str) -> ImageSafetyOutput:
     """OpenAI omni-moderation API for LLMs without vision support."""
     from app.services.openai_client import get_openai_client
+    from pathlib import Path
+    import base64
+
+    # Convert local file paths to base64 data URLs for omni-moderation API
+    actual_image_url = image_url
+    if not image_url.startswith(("http://", "https://", "data:")):
+        # It's a local file path - read it and convert to base64
+        try:
+            file_path = Path(image_url)
+            if not file_path.is_absolute():
+                # Make it absolute relative to current working directory
+                file_path = Path.cwd() / file_path
+            
+            if file_path.exists() and file_path.is_file():
+                # Read file and encode as base64
+                image_data = file_path.read_bytes()
+                base64_data = base64.b64encode(image_data).decode('utf-8')
+                # Determine MIME type from extension
+                mime_type = "image/png"  # default
+                if file_path.suffix.lower() in ['.jpg', '.jpeg']:
+                    mime_type = "image/jpeg"
+                elif file_path.suffix.lower() == '.gif':
+                    mime_type = "image/gif"
+                elif file_path.suffix.lower() == '.webp':
+                    mime_type = "image/webp"
+                
+                actual_image_url = f"data:{mime_type};base64,{base64_data}"
+                logger.debug(f"[ImageSafety-OmniMod] Converted local path to base64 data URL: {image_url} → data:{mime_type};base64,...")
+            else:
+                logger.warning(f"[ImageSafety-OmniMod] Local file not found: {image_url}, trying as-is")
+        except Exception as e:
+            logger.warning(f"[ImageSafety-OmniMod] Failed to read local file {image_url}: {e}, trying as-is")
 
     logger.info(
-        f"[ImageSafety-OmniMod] Prompt → image_url: {image_url}"
+        f"[ImageSafety-OmniMod] Prompt → image_url: {image_url} (converted: {actual_image_url[:100] if actual_image_url != image_url else 'same'})"
     )
 
     client = get_openai_client()
     moderation = client.moderations.create(
         model="omni-moderation-latest",
-        input=[{"type": "image_url", "image_url": {"url": image_url}}],
+        input=[{"type": "image_url", "image_url": {"url": actual_image_url}}],
     )
     result = moderation.results[0]
     cats = result.categories
