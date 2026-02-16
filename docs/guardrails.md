@@ -10,52 +10,50 @@ Kids Story Agent implements a **multi-layer safety framework** that ensures all 
 
 ```mermaid
 graph TB
-    subgraph "Story Text Safety Pipeline"
-        subgraph "Layer 0: OpenAI Moderation API (~50ms)"
-            L0[OpenAI Moderation API]
-            L0_V[Violence detection]
-            L0_S[Sexual content detection]
-            L0_SH[Self-harm detection]
-            L0_H[Hate speech detection]
-            L0_HR[Harassment detection]
-            L0 --> L0_V
-            L0 --> L0_S
-            L0 --> L0_SH
-            L0 --> L0_H
-            L0 --> L0_HR
-        end
-        
-        subgraph "Layer 1: PII Detection (regex, ~0ms)"
-            L1[PII Detection]
-            L1_E[Email addresses]
-            L1_P[Phone numbers]
-            L1_SSN[Social Security Numbers]
-            L1_CC[Credit card numbers]
-            L1 --> L1_E
-            L1 --> L1_P
-            L1 --> L1_SSN
-            L1 --> L1_CC
-        end
-        
-        subgraph "Layer 2: Custom LLM Safety Analysis (~2-3s)"
-            L2[Custom LLM Analysis]
-            L2_F[Fear intensity scoring 0-1]
-            L2_V[Violence severity assessment 0-1]
-            L2_B[Brand mention detection]
-            L2_P[Political content flags]
-            L2_R[Religious references]
-            L2 --> L2_F
-            L2 --> L2_V
-            L2 --> L2_B
-            L2 --> L2_P
-            L2 --> L2_R
-        end
+    subgraph Layer0["Layer 0: OpenAI Moderation API (~50ms)"]
+        L0["OpenAI Moderation API"]
+        L0_V["Violence detection"]
+        L0_S["Sexual content detection"]
+        L0_SH["Self-harm detection"]
+        L0_H["Hate speech detection"]
+        L0_HR["Harassment detection"]
+        L0 --> L0_V
+        L0 --> L0_S
+        L0 --> L0_SH
+        L0 --> L0_H
+        L0 --> L0_HR
     end
     
-    STORY[Story Text] --> L0
+    subgraph Layer1["Layer 1: PII Detection (regex, ~0ms)"]
+        L1["PII Detection"]
+        L1_E["Email addresses"]
+        L1_P["Phone numbers"]
+        L1_SSN["Social Security Numbers"]
+        L1_CC["Credit card numbers"]
+        L1 --> L1_E
+        L1 --> L1_P
+        L1 --> L1_SSN
+        L1 --> L1_CC
+    end
+    
+    subgraph Layer2["Layer 2: Custom LLM Safety Analysis (~2-3s)"]
+        L2["Custom LLM Analysis"]
+        L2_F["Fear intensity scoring 0-1"]
+        L2_V["Violence severity assessment 0-1"]
+        L2_B["Brand mention detection"]
+        L2_P["Political content flags"]
+        L2_R["Religious references"]
+        L2 --> L2_F
+        L2 --> L2_V
+        L2 --> L2_B
+        L2 --> L2_P
+        L2 --> L2_R
+    end
+    
+    STORY["Story Text"] --> L0
     L0 --> L1
     L1 --> L2
-    L2 --> RESULT[Guardrail Result]
+    L2 --> RESULT["Guardrail Result"]
 ```
 
 ## Layer 0: OpenAI Moderation API
@@ -386,42 +384,42 @@ Different thresholds for different age groups:
 ### Text Guardrails
 
 ```mermaid
-flowchart TD
-    START[Story Text] --> L0[Layer 0: OpenAI Moderation API]
-    L0 --> L0_CHECK{Hard violation?}
-    L0_CHECK -->|Yes| AUTO_REJECT[Auto-reject or flag]
-    L0_CHECK -->|No| L1[Layer 1: PII Detection]
+graph TD
+    START["Story Text"] --> L0["Layer 0: OpenAI Moderation API"]
+    L0 --> L0_CHECK{"Hard violation?"}
+    L0_CHECK -->|Yes| AUTO_REJECT["Auto-reject or flag"]
+    L0_CHECK -->|No| L1["Layer 1: PII Detection"]
     
-    L1 --> L1_CHECK{PII found?}
-    L1_CHECK -->|Yes| HARD_VIOLATION[Hard violation]
-    L1_CHECK -->|No| L2[Layer 2: Custom LLM Analysis]
+    L1 --> L1_CHECK{"PII found?"}
+    L1_CHECK -->|Yes| HARD_VIOLATION["Hard violation"]
+    L1_CHECK -->|No| L2["Layer 2: Custom LLM Analysis"]
     
-    L2 --> FEAR{Fear intensity > threshold?}
+    L2 --> FEAR{"Fear intensity > threshold?"}
     FEAR -->|Yes| HARD_VIOLATION
-    FEAR -->|No| VIOLENCE{Violence severity > threshold?}
+    FEAR -->|No| VIOLENCE{"Violence severity > threshold?"}
     VIOLENCE -->|Yes| HARD_VIOLATION
-    VIOLENCE -->|No| BRAND{Brand mentions?}
+    VIOLENCE -->|No| BRAND{"Brand mentions?"}
     BRAND -->|Yes| HARD_VIOLATION
-    BRAND -->|No| POLITICAL{Political content?}
+    BRAND -->|No| POLITICAL{"Political content?"}
     POLITICAL -->|Yes| HARD_VIOLATION
-    POLITICAL -->|No| RELIGIOUS{Religious references?}
-    RELIGIOUS -->|Yes| SOFT_WARNING[Soft warning]
-    RELIGIOUS -->|No| PASS[Pass]
+    POLITICAL -->|No| RELIGIOUS{"Religious references?"}
+    RELIGIOUS -->|Yes| SOFT_WARNING["Soft warning"]
+    RELIGIOUS -->|No| PASS["Pass"]
 ```
 
 ### Media Guardrails
 
 ```mermaid
-flowchart TD
-    START[Generated Image/Video] --> CHECK[Safety Check<br/>vision/prompt]
-    CHECK --> HARD_CHECK{Hard violation?}
-    HARD_CHECK -->|Yes| RETRY[Regenerate<br/>retry once]
-    RETRY --> RE_CHECK[Re-check]
-    RE_CHECK --> STILL_FAILS{Still fails?}
-    STILL_FAILS -->|Yes| ERROR[StoryGenerationError]
-    STILL_FAILS -->|No| PROCEED[Proceed]
-    HARD_CHECK -->|No| SOFT_CHECK{Soft violations?}
-    SOFT_CHECK -->|Yes| FLAG[Flag for review]
+graph TD
+    START["Generated Image/Video"] --> CHECK["Safety Check<br/>vision/prompt"]
+    CHECK --> HARD_CHECK{"Hard violation?"}
+    HARD_CHECK -->|Yes| RETRY["Regenerate<br/>retry once"]
+    RETRY --> RE_CHECK["Re-check"]
+    RE_CHECK --> STILL_FAILS{"Still fails?"}
+    STILL_FAILS -->|Yes| ERROR["StoryGenerationError"]
+    STILL_FAILS -->|No| PROCEED["Proceed"]
+    HARD_CHECK -->|No| SOFT_CHECK{"Soft violations?"}
+    SOFT_CHECK -->|Yes| FLAG["Flag for review"]
     SOFT_CHECK -->|No| PROCEED
 ```
 

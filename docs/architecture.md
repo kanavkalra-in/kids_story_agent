@@ -10,35 +10,35 @@ Kids Story Agent is built on a **multi-agent orchestration architecture** using 
 
 ```mermaid
 graph TB
-    subgraph "Application Layer"
-        API[FastAPI REST API]
-        CELERY[Celery Task Queue]
-        UI[Streamlit UI<br/>optional]
+    subgraph App["Application Layer"]
+        API["FastAPI REST API"]
+        CELERY["Celery Task Queue"]
+        UI["Streamlit UI<br/>optional"]
     end
     
-    subgraph "Orchestration Layer"
-        GRAPH[LangGraph StateGraph]
-        CHECKPOINT[PostgreSQL Checkpointer<br/>for interrupts]
-        STATE[State Management<br/>StoryState TypedDict]
+    subgraph Orchestration["Orchestration Layer"]
+        GRAPH["LangGraph StateGraph"]
+        CHECKPOINT["PostgreSQL Checkpointer<br/>for interrupts"]
+        STATE["State Management<br/>StoryState TypedDict"]
     end
     
-    subgraph "Agent Layer"
-        GEN[Generation Agents]
-        EVAL[Evaluation Agents]
-        REVIEW_AGENTS[Review Agents]
+    subgraph Agents["Agent Layer"]
+        GEN["Generation Agents"]
+        EVAL_AGENTS["Evaluation Agents"]
+        REVIEW_AGENTS["Review Agents"]
     end
     
-    subgraph "Service Layer"
-        LLM[LLM Service<br/>OpenAI/Anthropic/Ollama]
-        MOD[Moderation Service<br/>OpenAI Moderation API]
-        STORAGE[Storage Service<br/>Local/S3]
-        REDIS_SVC[Redis Client<br/>rate limiting, caching]
+    subgraph Services["Service Layer"]
+        LLM["LLM Service<br/>OpenAI/Anthropic/Ollama"]
+        MOD["Moderation Service<br/>OpenAI Moderation API"]
+        STORAGE["Storage Service<br/>Local/S3"]
+        REDIS_SVC["Redis Client<br/>rate limiting, caching"]
     end
     
-    subgraph "Infrastructure Layer"
-        PG[(PostgreSQL<br/>persistent storage)]
-        REDIS_INF[(Redis<br/>task queue, rate limiting)]
-        S3[AWS S3<br/>optional media storage]
+    subgraph Infrastructure["Infrastructure Layer"]
+        PG[("PostgreSQL<br/>persistent storage")]
+        REDIS_INF[("Redis<br/>task queue, rate limiting")]
+        S3["AWS S3<br/>optional media storage"]
     end
     
     API --> GRAPH
@@ -47,10 +47,10 @@ graph TB
     GRAPH --> CHECKPOINT
     GRAPH --> STATE
     GRAPH --> GEN
-    GRAPH --> EVAL
+    GRAPH --> EVAL_AGENTS
     GRAPH --> REVIEW_AGENTS
     GEN --> LLM
-    EVAL --> MOD
+    EVAL_AGENTS --> MOD
     GEN --> STORAGE
     REVIEW_AGENTS --> CHECKPOINT
     LLM --> PG
@@ -75,41 +75,41 @@ The workflow is organized into **4 distinct phases**:
 
 ```mermaid
 graph TB
-    START([Start]) --> INPUT[input_moderator<br/>OpenAI Moderation API]
-    INPUT --> CHECK_INPUT{Input safe?}
-    CHECK_INPUT -->|No| AUTO_REJECT1[mark_auto_rejected]
-    CHECK_INPUT -->|Yes| STORY[story_writer]
+    START([Start]) --> INPUT["input_moderator<br/>OpenAI Moderation API"]
+    INPUT --> CHECK_INPUT{"Input safe?"}
+    CHECK_INPUT -->|No| AUTO_REJECT1["mark_auto_rejected"]
+    CHECK_INPUT -->|Yes| STORY["story_writer"]
     AUTO_REJECT1 --> END1([END])
     
-    STORY --> IMG_PROMPT[image_prompter]
-    STORY --> VID_PROMPT[video_prompter]
+    STORY --> IMG_PROMPT["image_prompter"]
+    STORY --> VID_PROMPT["video_prompter"]
     
-    IMG_PROMPT --> IMG_GEN[generate_single_image × N]
-    VID_PROMPT --> VID_GEN[generate_single_video × M]
+    IMG_PROMPT --> IMG_GEN["generate_single_image<br/>N instances"]
+    VID_PROMPT --> VID_GEN["generate_single_video<br/>M instances"]
     
-    IMG_GEN --> ASSEMBLER[assembler]
+    IMG_GEN --> ASSEMBLER["assembler"]
     VID_GEN --> ASSEMBLER
     
-    ASSEMBLER --> ROUTE[route_to_guardrails<br/>fan-out]
+    ASSEMBLER --> ROUTE["route_to_guardrails<br/>fan-out"]
     
-    ROUTE --> EVAL[story_evaluator]
-    ROUTE --> STORY_GUARD[story_guardrail]
-    ROUTE --> IMG_GUARD[image_guardrail × N]
-    ROUTE --> VID_GUARD[video_guardrail × M]
+    ROUTE --> EVAL["story_evaluator"]
+    ROUTE --> STORY_GUARD["story_guardrail"]
+    ROUTE --> IMG_GUARD["image_guardrail<br/>N instances"]
+    ROUTE --> VID_GUARD["video_guardrail<br/>M instances"]
     
-    EVAL --> AGGREGATOR[guardrail_aggregator<br/>fan-in]
+    EVAL --> AGGREGATOR["guardrail_aggregator<br/>fan-in"]
     STORY_GUARD --> AGGREGATOR
     IMG_GUARD --> AGGREGATOR
     VID_GUARD --> AGGREGATOR
     
-    AGGREGATOR --> CHECK_VIOLATIONS{Hard violations?}
-    CHECK_VIOLATIONS -->|Yes| AUTO_REJECT2[mark_auto_rejected]
-    CHECK_VIOLATIONS -->|No| REVIEW[human_review_gate<br/>interrupt]
+    AGGREGATOR --> CHECK_VIOLATIONS{"Hard violations?"}
+    CHECK_VIOLATIONS -->|Yes| AUTO_REJECT2["mark_auto_rejected"]
+    CHECK_VIOLATIONS -->|No| REVIEW["human_review_gate<br/>interrupt"]
     AUTO_REJECT2 --> END2([END])
     
-    REVIEW --> CHECK_DECISION{Decision?}
-    CHECK_DECISION -->|approved| PUBLISHER[publisher]
-    CHECK_DECISION -->|rejected| REJECT[mark_rejected]
+    REVIEW --> CHECK_DECISION{"Decision?"}
+    CHECK_DECISION -->|approved| PUBLISHER["publisher"]
+    CHECK_DECISION -->|rejected| REJECT["mark_rejected"]
     PUBLISHER --> END3([END])
     REJECT --> END4([END])
     

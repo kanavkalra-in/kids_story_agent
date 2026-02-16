@@ -27,47 +27,36 @@ We've built a **production-grade AI system** that combines:
 
 ```mermaid
 graph TB
-    subgraph "Application Layer"
-        API[FastAPI REST API<br/>Authentication, Rate Limiting, Request Validation]
+    subgraph App["Application Layer"]
+        API["FastAPI REST API<br/>Authentication, Rate Limiting"]
     end
     
-    subgraph "Task Queue"
-        CELERY[Celery Task Queue<br/>Async Job Processing, Distributed Workers]
+    subgraph Queue["Task Queue"]
+        CELERY["Celery Task Queue<br/>Async Job Processing"]
     end
     
-    subgraph "LangGraph Multi-Agent Workflow"
-        subgraph "Phase 1: Input Moderation"
-            INPUT[Input Moderator<br/>OpenAI Moderation API<br/>Early rejection of unsafe inputs]
-        end
-        
-        subgraph "Phase 2: Content Generation"
-            STORY[Story Writer<br/>LLM: GPT-4/Claude/Ollama]
-            IMG_PROMPT[Image Prompter]
-            VID_PROMPT[Video Prompter]
-            IMG_GEN[Image Generator × N<br/>DALL-E 3, parallel]
-            VID_GEN[Video Generator × M<br/>Sora, parallel]
-            ASSEMBLER[Assembler<br/>Validation, sorting, metadata]
-        end
-        
-        subgraph "Phase 3: Evaluation & Guardrails"
-            EVAL[Story Evaluator<br/>Quality scoring]
-            STORY_GUARD[Story Guardrail<br/>3-layer text safety]
-            IMG_GUARD[Image Guardrail × N<br/>Vision-based, with retry]
-            VID_GUARD[Video Guardrail × M<br/>Prompt + frame sampling]
-            AGGREGATOR[Guardrail Aggregator<br/>Decision logic]
-        end
-        
-        subgraph "Phase 4: Human Review"
-            REVIEW[Human Review Gate<br/>LangGraph Interrupt]
-            PUBLISHER[Publisher<br/>Final persistence]
-        end
+    subgraph Workflow["LangGraph Multi-Agent Workflow"]
+        INPUT["Input Moderator<br/>OpenAI Moderation API"]
+        STORY["Story Writer<br/>LLM: GPT-4/Claude/Ollama"]
+        IMG_PROMPT["Image Prompter"]
+        VID_PROMPT["Video Prompter"]
+        IMG_GEN["Image Generator N instances<br/>DALL-E 3, parallel"]
+        VID_GEN["Video Generator M instances<br/>Sora, parallel"]
+        ASSEMBLER["Assembler<br/>Validation, sorting"]
+        EVAL["Story Evaluator<br/>Quality scoring"]
+        STORY_GUARD["Story Guardrail<br/>3-layer text safety"]
+        IMG_GUARD["Image Guardrail N instances<br/>Vision-based, with retry"]
+        VID_GUARD["Video Guardrail M instances<br/>Prompt + frame sampling"]
+        AGGREGATOR["Guardrail Aggregator<br/>Decision logic"]
+        REVIEW["Human Review Gate<br/>LangGraph Interrupt"]
+        PUBLISHER["Publisher<br/>Final persistence"]
     end
     
-    subgraph "Storage & Infrastructure"
-        PG[(PostgreSQL<br/>Stories, jobs, evaluations, reviews)]
-        REDIS[(Redis<br/>Rate limiting, job status cache)]
-        S3[AWS S3 + CloudFront<br/>Optional media storage]
-        LOCAL[Local Storage<br/>Development]
+    subgraph Storage["Storage & Infrastructure"]
+        PG[("PostgreSQL<br/>Stories, jobs, evaluations")]
+        REDIS[("Redis<br/>Rate limiting, cache")]
+        S3["AWS S3 + CloudFront<br/>Optional media storage"]
+        LOCAL["Local Storage<br/>Development"]
     end
     
     API --> CELERY
