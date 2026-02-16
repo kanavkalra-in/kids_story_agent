@@ -110,5 +110,3 @@ def generate_media_prompts(
         f"{media_type}_prompts": prompts,
         f"{media_type}_descriptions": descriptions,
     }
-
-

@@ -2,7 +2,7 @@ from app.services.openai_client import get_openai_client
 from app.services.s3 import s3_service
 from app.config import settings
 from app.agents.state import StoryState
-from app.agents.prompter_utils import StoryGenerationError
+from app.agents.nodes.generation.prompter_utils import StoryGenerationError
 from app.constants import HTTP_TIMEOUT
 import httpx
 import logging

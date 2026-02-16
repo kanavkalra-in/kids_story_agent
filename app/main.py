@@ -7,6 +7,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.config import settings, limiter
 from app.db.session import engine, Base
 from app.api.stories import router as stories_router
+from app.api.reviews import router as reviews_router
 import logging
 
 # Configure logging
@@ -96,6 +97,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(stories_router, prefix="/api/v1")
+app.include_router(reviews_router, prefix="/api/v1")
 
 
 @app.get("/")

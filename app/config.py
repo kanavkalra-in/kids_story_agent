@@ -61,7 +61,23 @@ class Settings(BaseSettings):
     
     # Logging
     log_sql: bool = False  # Whether to echo SQL queries (separate from environment)
-    
+
+    # ── Guardrail Settings ──
+    guardrail_fear_threshold: float = 0.4              # 0–1, above this triggers violation
+    guardrail_violence_hard_threshold: float = 0.6     # above = hard fail, below = soft warning
+    media_guardrail_max_retries: int = 2               # max regeneration retries per image/video
+    guardrail_auto_reject_on_hard_fail: bool = True    # skip human review for hard violations
+
+    # ── Video Guardrail Settings ──
+    video_frame_sampling_enabled: bool = True
+    video_sample_frames: int = 5                       # number of frames to sample per video
+
+    # ── Human Review Settings ──
+    review_timeout_days: int = 3                       # auto-reject after N days with no review
+
+    # ── Checkpointer (for LangGraph interrupt/resume) ──
+    checkpointer_conn_string: str = ""                 # defaults to sync database_url if empty
+
     class Config:
         env_file = ".env"
         case_sensitive = False

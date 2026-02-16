@@ -51,7 +51,7 @@ class StoryVideoResponse(BaseModel):
 
 class JobStatusResponse(BaseModel):
     job_id: uuid.UUID
-    status: str  # pending, processing, completed, failed
+    status: str  # pending, processing, guardrail_check, pending_review, approved, rejected, auto_rejected, published, completed, failed
     error: Optional[str] = None
     story_id: Optional[uuid.UUID] = None
     created_at: datetime

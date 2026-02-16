@@ -2,7 +2,7 @@ from app.services.openai_client import get_openai_client
 from app.services.s3 import s3_service
 from app.config import settings
 from app.agents.state import StoryState
-from app.agents.prompter_utils import StoryGenerationError
+from app.agents.nodes.generation.prompter_utils import StoryGenerationError
 from app.constants import (
     VIDEO_MAX_POLL_ATTEMPTS,
     VIDEO_POLL_INITIAL_INTERVAL,
@@ -94,8 +94,6 @@ async def video_generator_node(state: StoryState) -> dict:
             )
             content_url = f"{base_url}/videos/{video_id}/content"
 
-            # Use httpx.AsyncClient with auth to avoid exposing API key in headers dict
-            # This prevents the key from appearing in error tracebacks
             async with httpx.AsyncClient(
                 timeout=HTTP_LONG_TIMEOUT,
                 headers={"Authorization": f"Bearer {settings.openai_api_key}"}
@@ -105,7 +103,6 @@ async def video_generator_node(state: StoryState) -> dict:
                     response.raise_for_status()
                     video_data = response.content
                 except httpx.HTTPError as e:
-                    # Log error without exposing headers (which contain the API key)
                     logger.error(
                         f"Job {job_id}: Failed to fetch video content from {content_url}: "
                         f"{type(e).__name__}: {str(e)}"
@@ -125,7 +122,6 @@ async def video_generator_node(state: StoryState) -> dict:
                 f"Video generation failed: {getattr(video_status, 'error', 'Unknown error')}"
             )
         elif video_status.status in ("queued", "in_progress"):
-            # Calculate exponential backoff delay
             delay = min(
                 VIDEO_POLL_INITIAL_INTERVAL * (VIDEO_POLL_BACKOFF_MULTIPLIER ** attempt),
                 VIDEO_POLL_MAX_INTERVAL

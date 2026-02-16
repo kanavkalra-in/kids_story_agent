@@ -41,3 +41,29 @@ class StoryState(TypedDict):
 
     # Error handling
     error: Optional[str]
+
+    # ── Evaluation Scores (set by story_evaluator node) ──
+    evaluation_scores: Optional[dict]
+
+    # ── Guardrail Results (reducer — each parallel Send appends violations) ──
+    guardrail_violations: Annotated[List[dict], operator.add]
+
+    # ── Aggregated guardrail outcome (set by guardrail_aggregator) ──
+    guardrail_passed: Optional[bool]
+    guardrail_summary: Optional[str]
+
+    # ── Final media URLs after guardrail retries (reducer) ──
+    # Each guardrail node returns the final good URL for its media item
+    # Format: [{"index": 0, "url": "..."}, ...]
+    image_urls_final: Annotated[List[dict], operator.add]
+    video_urls_final: Annotated[List[dict], operator.add]
+
+    # ── Human Review (set after interrupt resumes) ──
+    review_decision: Optional[str]    # "approved" | "rejected"
+    review_comment: Optional[str]
+    reviewer_id: Optional[str]
+
+    # ── Guardrail routing keys (injected by Send for guardrail nodes) ──
+    _guardrail_media_url: Optional[str]
+    _guardrail_media_index: Optional[int]
+    _guardrail_original_prompt: Optional[str]

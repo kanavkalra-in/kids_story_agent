@@ -1,5 +1,5 @@
 from app.agents.state import StoryState
-from app.agents.prompter_utils import StoryGenerationError
+from app.agents.nodes.generation.prompter_utils import StoryGenerationError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,6 @@ def assembler_node(state: StoryState) -> dict:
     # can arrive out of display-order.  Sort both lists together by the index
     # the generator embedded in metadata so the assembler writes the correct
     # display_order to the database.
-    # With structured output, generators always produce paired URL+metadata, so assert on mismatch
     if image_urls:
         assert len(image_metadata) == len(image_urls), (
             f"Image URLs and metadata count mismatch: {len(image_urls)} URLs, "

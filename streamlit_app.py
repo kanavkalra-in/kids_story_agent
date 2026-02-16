@@ -151,7 +151,7 @@ if st.session_state.switch_to_view_tab:
     st.info("Story loaded! Switch to the **View Story** tab to see it.")
     st.session_state.switch_to_view_tab = False
 
-tab1, tab2, tab3, tab4 = st.tabs(["Generate Story", "Check Status", "View Story", "All Stories"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Generate Story", "Check Status", "View Story", "All Stories", "📋 Review Queue"])
 
 # Tab 1: Generate Story
 with tab1:
@@ -525,6 +525,204 @@ with tab4:
         st.info("Make sure the API is running and accessible.")
     except Exception as e:
         st.error(f"Unexpected error: {str(e)}")
+
+# Tab 5: Review Queue
+with tab5:
+    st.header("📋 Review Queue")
+    st.markdown("Approve or reject stories before they are published.")
+
+    def fetch_pending_reviews():
+        """Fetch stories pending human review from the API."""
+        try:
+            resp = requests.get(f"{API_BASE_URL}/api/v1/reviews/pending", timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Error fetching reviews: {e}")
+            return None
+
+    def fetch_review_detail(job_id: str):
+        """Fetch the full review package for a story."""
+        try:
+            resp = requests.get(f"{API_BASE_URL}/api/v1/reviews/{job_id}", timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Error fetching review detail: {e}")
+            return None
+
+    def submit_decision(job_id: str, decision: str, comment: str = "", reviewer_id: str = ""):
+        """Submit a review decision (approve/reject)."""
+        try:
+            resp = requests.post(
+                f"{API_BASE_URL}/api/v1/reviews/{job_id}/decide",
+                json={"decision": decision, "comment": comment, "reviewer_id": reviewer_id},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Error submitting decision: {e}")
+            return None
+
+    def regenerate_story_api(job_id: str):
+        """Request regeneration of a rejected story."""
+        try:
+            resp = requests.post(
+                f"{API_BASE_URL}/api/v1/reviews/{job_id}/regenerate",
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Error regenerating story: {e}")
+            return None
+
+    # Reviewer identity
+    reviewer_id = st.text_input("Your Reviewer ID", value="reviewer_1", key="reviewer_id_input")
+
+    # Refresh
+    if st.button("🔄 Refresh Review Queue", type="secondary"):
+        st.rerun()
+
+    pending = fetch_pending_reviews()
+    if pending is None:
+        st.info("Unable to load review queue. Ensure the API is running.")
+    elif pending["total"] == 0:
+        st.success("🎉 No stories pending review!")
+    else:
+        st.info(f"**{pending['total']}** stories awaiting review")
+
+        for item in pending["reviews"]:
+            job_id = str(item["job_id"])
+
+            with st.expander(
+                f"{'🚫' if item['num_hard_violations'] > 0 else '✅'} "
+                f"{item.get('story_title') or 'Untitled'} — "
+                f"Age {item['age_group']} — "
+                f"Score {item.get('overall_eval_score', 'N/A')}/10 — "
+                f"{item['num_hard_violations']} hard, {item['num_soft_violations']} soft",
+                expanded=False,
+            ):
+                st.markdown(f"**Job ID:** `{job_id}`")
+                st.markdown(f"**Prompt:** {item['prompt'][:200]}")
+                st.markdown(f"**Created:** {item['created_at']}")
+                st.markdown(f"**Images:** {item.get('num_images', 0)} | **Videos:** {item.get('num_videos', 0)}")
+
+                # Load full detail
+                if st.button("Load Full Review", key=f"load_review_{job_id}"):
+                    detail = fetch_review_detail(job_id)
+                    if detail:
+                        st.session_state[f"review_detail_{job_id}"] = detail
+
+                detail = st.session_state.get(f"review_detail_{job_id}")
+                if detail:
+                    # ─── Evaluation Scores ───
+                    eval_scores = detail.get("evaluation_scores")
+                    if eval_scores:
+                        st.markdown("#### 📊 Evaluation Scores")
+                        score_cols = st.columns(5)
+                        labels = [
+                            ("Moral", "moral_score"),
+                            ("Theme", "theme_appropriateness"),
+                            ("Emotion", "emotional_positivity"),
+                            ("Age Fit", "age_appropriateness"),
+                            ("Education", "educational_value"),
+                        ]
+                        for col, (label, key) in zip(score_cols, labels):
+                            with col:
+                                val = eval_scores.get(key, 0)
+                                st.metric(label, f"{val}/10")
+                        st.markdown(f"**Overall:** {eval_scores.get('overall_score', 'N/A')}/10")
+                        if eval_scores.get("evaluation_summary"):
+                            st.info(eval_scores["evaluation_summary"])
+
+                    # ─── Guardrail Summary ───
+                    st.markdown("#### 🛡️ Guardrail Report")
+                    if detail.get("guardrail_summary"):
+                        st.text(detail["guardrail_summary"])
+
+                    violations = detail.get("violations", [])
+                    if violations:
+                        for v in violations:
+                            severity_icon = "🚫" if v["severity"] == "hard" else "⚠️"
+                            st.markdown(
+                                f"{severity_icon} **{v['guardrail_name']}** "
+                                f"({v['media_type']}"
+                                f"{' #' + str(v['media_index']) if v.get('media_index') is not None else ''}) "
+                                f"— conf: {v['confidence']:.2f} — {v.get('detail', '')}"
+                            )
+
+                    # ─── Story Text ───
+                    if detail.get("story_text"):
+                        st.markdown("#### 📖 Story")
+                        st.markdown(detail["story_text"])
+
+                    # ─── Images ───
+                    if detail.get("image_urls"):
+                        st.markdown("#### 🖼️ Images")
+                        img_cols = st.columns(min(3, len(detail["image_urls"])))
+                        for idx, url in enumerate(detail["image_urls"]):
+                            with img_cols[idx % len(img_cols)]:
+                                resolved = convert_local_path_to_url(url, "image", api_base_url=API_BASE_URL)
+                                st.image(resolved, caption=f"Image {idx + 1}")
+
+                    # ─── Videos ───
+                    if detail.get("video_urls"):
+                        st.markdown("#### 🎬 Videos")
+                        vid_cols = st.columns(min(3, len(detail["video_urls"])))
+                        for idx, url in enumerate(detail["video_urls"]):
+                            with vid_cols[idx % len(vid_cols)]:
+                                resolved = convert_local_path_to_url(url, "video", api_base_url=API_BASE_URL)
+                                st.video(resolved)
+
+                    # ─── Decision Buttons ───
+                    st.markdown("---")
+                    comment = st.text_area(
+                        "Review Comment (optional)",
+                        key=f"comment_{job_id}",
+                        placeholder="Add any notes for your review...",
+                    )
+
+                    btn_cols = st.columns(3)
+                    with btn_cols[0]:
+                        if st.button("✅ Approve", key=f"approve_{job_id}", type="primary"):
+                            result = submit_decision(job_id, "approved", comment, reviewer_id)
+                            if result:
+                                st.success(f"✅ {result.get('message', 'Approved!')}")
+                                # Clean up
+                                if f"review_detail_{job_id}" in st.session_state:
+                                    del st.session_state[f"review_detail_{job_id}"]
+                                time.sleep(1)
+                                st.rerun()
+
+                    with btn_cols[1]:
+                        if st.button("❌ Reject", key=f"reject_{job_id}", type="secondary"):
+                            result = submit_decision(job_id, "rejected", comment, reviewer_id)
+                            if result:
+                                st.warning(f"❌ {result.get('message', 'Rejected.')}")
+                                if f"review_detail_{job_id}" in st.session_state:
+                                    del st.session_state[f"review_detail_{job_id}"]
+                                time.sleep(1)
+                                st.rerun()
+
+                    with btn_cols[2]:
+                        if st.button("🔄 Reject & Regenerate", key=f"regen_{job_id}"):
+                            # First reject
+                            rej_result = submit_decision(job_id, "rejected", comment, reviewer_id)
+                            if rej_result:
+                                # Then regenerate
+                                regen_result = regenerate_story_api(job_id)
+                                if regen_result:
+                                    st.info(
+                                        f"🔄 New job created: `{regen_result['new_job_id']}` "
+                                        f"(linked to original `{job_id}`)"
+                                    )
+                                if f"review_detail_{job_id}" in st.session_state:
+                                    del st.session_state[f"review_detail_{job_id}"]
+                                time.sleep(1)
+                                st.rerun()
+
 
 # Footer
 st.markdown("---")

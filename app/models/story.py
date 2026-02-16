@@ -1,4 +1,7 @@
-from sqlalchemy import Column, String, Text, Integer, Boolean, ForeignKey, DateTime, Enum as SQLEnum
+from sqlalchemy import (
+    Column, String, Text, Integer, Boolean, Float,
+    ForeignKey, DateTime, Enum as SQLEnum,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -11,6 +14,12 @@ from app.db.session import Base
 class JobStatus(str, enum.Enum):
     PENDING = "pending"
     PROCESSING = "processing"
+    GUARDRAIL_CHECK = "guardrail_check"
+    PENDING_REVIEW = "pending_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    AUTO_REJECTED = "auto_rejected"
+    PUBLISHED = "published"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -31,8 +40,15 @@ class StoryJob(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    # Link to parent job for regeneration traceability
+    parent_job_id = Column(UUID(as_uuid=True), ForeignKey("story_jobs.id"), nullable=True)
+
     # Relationships
     story = relationship("Story", back_populates="job", uselist=False, cascade="all, delete-orphan")
+    evaluation = relationship("StoryEvaluation", back_populates="job", uselist=False, cascade="all, delete-orphan")
+    guardrail_results = relationship("GuardrailResult", back_populates="job", cascade="all, delete-orphan")
+    review = relationship("StoryReview", back_populates="job", uselist=False, cascade="all, delete-orphan")
+    parent_job = relationship("StoryJob", remote_side=[id], uselist=False)
 
 
 class Story(Base):
