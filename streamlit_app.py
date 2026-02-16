@@ -22,6 +22,13 @@ API_BASE_URL = st.sidebar.text_input(
     help="Base URL of the Kids Story Agent API"
 )
 
+# For browser-facing URLs (images/videos), use localhost if we're in Docker
+# This allows the browser to access the API even when Streamlit is in a container
+BROWSER_API_BASE_URL = os.getenv("BROWSER_API_BASE_URL", "http://localhost:8000")
+# If API_BASE_URL is the internal Docker service name, use localhost for browser
+if API_BASE_URL.startswith("http://api:") or API_BASE_URL.startswith("https://api:"):
+    BROWSER_API_BASE_URL = API_BASE_URL.replace("api:", "localhost:")
+
 
 st.set_page_config(
     page_title="Kids Story Agent - Test UI",
@@ -106,6 +113,15 @@ def list_stories(limit: int = 100, offset: int = 0) -> dict:
     return response.json()
 
 
+def list_rejected_stories(limit: int = 100, offset: int = 0) -> dict:
+    """List all rejected stories"""
+    url = f"{API_BASE_URL}/api/v1/stories/rejected"
+    params = {"limit": limit, "offset": offset}
+    response = requests.get(url, params=params, timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+
 def generate_audio(text: str, story_id: str, lang: str = "en") -> Optional[bytes]:
     """Generate audio from text using gTTS"""
     try:
@@ -152,7 +168,7 @@ if st.session_state.switch_to_view_tab:
     st.info("Story loaded! Switch to the **View Story** tab to see it.")
     st.session_state.switch_to_view_tab = False
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Generate Story", "Check Status", "View Story", "All Stories", "📋 Review Queue"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Generate Story", "Check Status", "View Story", "All Stories", "📋 Review Queue", "❌ Rejected Stories"])
 
 # Tab 1: Generate Story
 with tab1:
@@ -430,11 +446,15 @@ with tab3:
                     col = cols[idx % len(cols)]
                     with col:
                         # Resolve relative URLs and local paths to full HTTP URLs
+                        # Use BROWSER_API_BASE_URL for browser-accessible URLs
                         image_url = convert_local_path_to_url(
                             image['image_url'],
                             "image",
-                            api_base_url=API_BASE_URL
+                            api_base_url=BROWSER_API_BASE_URL
                         )
+                        # Replace internal Docker service URLs with browser-accessible URLs
+                        if image_url.startswith("http://api:") or image_url.startswith("https://api:"):
+                            image_url = image_url.replace("http://api:", "http://localhost:").replace("https://api:", "https://localhost:")
                         st.image(image_url, width='stretch')
                         with st.expander(f"Image {idx + 1} Details"):
                             st.markdown(f"**Scene:** {image.get('scene_description', 'N/A')}")
@@ -453,8 +473,11 @@ with tab3:
                         video_url = convert_local_path_to_url(
                             video['video_url'],
                             "video",
-                            api_base_url=API_BASE_URL
+                            api_base_url=BROWSER_API_BASE_URL
                         )
+                        # Replace internal Docker service URLs with browser-accessible URLs
+                        if video_url.startswith("http://api:") or video_url.startswith("https://api:"):
+                            video_url = video_url.replace("http://api:", "http://localhost:").replace("https://api:", "https://localhost:")
                         st.video(video_url)
                         with st.expander(f"Video {idx + 1} Details"):
                             st.markdown(f"**Scene:** {video.get('scene_description', 'N/A')}")
@@ -465,12 +488,12 @@ with tab3:
             with st.expander("View Full Story JSON"):
                 st.json(story_data)
 
-# Tab 4: All Stories
+# Tab 4: Approved Stories
 with tab4:
-    st.header("All Stories")
-    st.markdown("Browse and view all created stories")
+    st.header("✅ Approved Stories")
+    st.markdown("Browse and view all approved and published stories")
     
-    refresh_button = st.button("🔄 Refresh List", type="secondary")
+    refresh_button = st.button("🔄 Refresh List", type="secondary", key="refresh_approved_stories")
     
     try:
         with st.spinner("Loading stories..."):
@@ -589,7 +612,7 @@ with tab5:
     reviewer_id = st.text_input("Your Reviewer ID", value="reviewer_1", key="reviewer_id_input")
 
     # Refresh
-    if st.button("🔄 Refresh Review Queue", type="secondary"):
+    if st.button("🔄 Refresh Review Queue", type="secondary", key="refresh_review_queue"):
         st.rerun()
 
     pending = fetch_pending_reviews()
@@ -671,7 +694,10 @@ with tab5:
                         img_cols = st.columns(min(3, len(detail["image_urls"])))
                         for idx, url in enumerate(detail["image_urls"]):
                             with img_cols[idx % len(img_cols)]:
-                                resolved = convert_local_path_to_url(url, "image", api_base_url=API_BASE_URL)
+                                resolved = convert_local_path_to_url(url, "image", api_base_url=BROWSER_API_BASE_URL)
+                                # Replace internal Docker service URLs with browser-accessible URLs
+                                if resolved.startswith("http://api:") or resolved.startswith("https://api:"):
+                                    resolved = resolved.replace("http://api:", "http://localhost:").replace("https://api:", "https://localhost:")
                                 st.image(resolved, caption=f"Image {idx + 1}")
 
                     # ─── Videos ───
@@ -680,7 +706,10 @@ with tab5:
                         vid_cols = st.columns(min(3, len(detail["video_urls"])))
                         for idx, url in enumerate(detail["video_urls"]):
                             with vid_cols[idx % len(vid_cols)]:
-                                resolved = convert_local_path_to_url(url, "video", api_base_url=API_BASE_URL)
+                                resolved = convert_local_path_to_url(url, "video", api_base_url=BROWSER_API_BASE_URL)
+                                # Replace internal Docker service URLs with browser-accessible URLs
+                                if resolved.startswith("http://api:") or resolved.startswith("https://api:"):
+                                    resolved = resolved.replace("http://api:", "http://localhost:").replace("https://api:", "https://localhost:")
                                 st.video(resolved)
 
                     # ─── Decision Buttons ───
@@ -729,6 +758,115 @@ with tab5:
                                     del st.session_state[f"review_detail_{job_id}"]
                                 time.sleep(1)
                                 st.rerun()
+
+# Tab 6: Rejected Stories
+with tab6:
+    st.header("❌ Rejected Stories")
+    st.markdown("View all stories that were rejected (by LLM/guardrails or human reviewers)")
+    
+    refresh_button = st.button("🔄 Refresh List", type="secondary", key="refresh_rejected_stories")
+    
+    try:
+        with st.spinner("Loading rejected stories..."):
+            rejected_data = list_rejected_stories(limit=100, offset=0)
+            rejected_stories = rejected_data.get("stories", [])
+            total = rejected_data.get("total", 0)
+        
+        if total == 0:
+            st.info("No rejected stories found.")
+        else:
+            st.success(f"Found {total} rejected story/stories")
+            
+            # Display rejected stories in a list
+            for idx, story in enumerate(rejected_stories):
+                with st.container():
+                    col1, col2, col3 = st.columns([3, 1, 1])
+                    
+                    with col1:
+                        st.markdown(f"### {story.get('story_title', 'Untitled Story')}")
+                        st.markdown(f"**Prompt:** {story.get('prompt', '')[:100]}{'...' if len(story.get('prompt', '')) > 100 else ''}")
+                        
+                        # Display rejection reason
+                        rejection_reason = story.get('rejection_reason', 'unknown')
+                        if rejection_reason == 'llm_guardrail':
+                            st.markdown("**Rejection Type:** 🤖 LLM/Guardrail")
+                        elif rejection_reason == 'human':
+                            st.markdown("**Rejection Type:** 👤 Human")
+                        elif rejection_reason == 'timeout':
+                            st.markdown("**Rejection Type:** ⏰ Timeout")
+                        else:
+                            st.markdown(f"**Rejection Type:** {rejection_reason or 'Unknown'}")
+                        
+                        # Display comment/reason
+                        comment = story.get('comment', '')
+                        if comment:
+                            st.markdown(f"**Reason/Comment:** {comment}")
+                        else:
+                            st.markdown("*No comment provided*")
+                    
+                    with col2:
+                        st.markdown(f"**Age Group:** {story.get('age_group', 'N/A')}")
+                        st.markdown(f"**Created:**")
+                        created_at = story.get('created_at', '')
+                        if created_at:
+                            st.markdown(f"{created_at[:10] if isinstance(created_at, str) else str(created_at)[:10]}")
+                        
+                        reviewed_at = story.get('reviewed_at')
+                        if reviewed_at:
+                            st.markdown(f"**Reviewed:**")
+                            st.markdown(f"{reviewed_at[:10] if isinstance(reviewed_at, str) else str(reviewed_at)[:10]}")
+                        
+                        reviewer_id = story.get('reviewer_id')
+                        if reviewer_id:
+                            st.markdown(f"**Reviewer:** {reviewer_id}")
+                    
+                    with col3:
+                        job_id = story.get('job_id')
+                        if job_id:
+                            # Button to view job details
+                            if st.button("View Details", key=f"view_rejected_{job_id}", type="primary"):
+                                st.info(f"Job ID: `{job_id}` - Use 'Check Status' tab to view job details")
+                    
+                    # Display story content and images in an expandable section
+                    story_content = story.get('story_content')
+                    image_urls = story.get('image_urls', [])
+                    
+                    if story_content or image_urls:
+                        with st.expander(f"📖 View Story Content & Images", expanded=False):
+                            if story_content:
+                                st.markdown("### Story Content")
+                                st.markdown(story_content)
+                                st.markdown("---")
+                            
+                            if image_urls:
+                                st.markdown(f"### Generated Images ({len(image_urls)} images)")
+                                # Display images in columns
+                                img_cols = st.columns(min(3, len(image_urls)))
+                                for img_idx, img_url in enumerate(image_urls):
+                                    with img_cols[img_idx % len(img_cols)]:
+                                        # Convert to browser-accessible URL
+                                        browser_url = convert_local_path_to_url(
+                                            img_url,
+                                            "image",
+                                            api_base_url=BROWSER_API_BASE_URL
+                                        )
+                                        # Replace internal Docker service URLs
+                                        if browser_url.startswith("http://api:") or browser_url.startswith("https://api:"):
+                                            browser_url = browser_url.replace("http://api:", "http://localhost:").replace("https://api:", "https://localhost:")
+                                        st.image(browser_url, caption=f"Image {img_idx + 1}", use_container_width=True)
+                            elif story_content:
+                                st.info("No images were generated for this story.")
+                            else:
+                                st.info("Story content and images are not available for this rejected story.")
+                    
+                    if idx < len(rejected_stories) - 1:
+                        st.markdown("---")
+    
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error loading rejected stories: {str(e)}")
+        st.info("Make sure the API is running and accessible.")
+    except Exception as e:
+        st.error(f"Unexpected error: {str(e)}")
 
 
 # Footer

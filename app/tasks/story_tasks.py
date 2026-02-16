@@ -17,6 +17,7 @@ from app.constants import (
     REVIEW_APPROVED,
     REVIEW_AUTO_REJECTED,
     REVIEW_REJECTED,
+    REVIEW_TIMEOUT_REJECTED,
 )
 from typing import Any
 import uuid
@@ -371,7 +372,8 @@ def _handle_review_outcome(
         return {"job_id": job_id, "status": "auto_rejected"}
 
     else:
-        # Human rejected
+        # Human rejected - ensure story content is persisted so it can be viewed later
+        _persist_pre_review_data(job_id, final_state)
         _persist_review_to_db(job_id, final_state)
         update_job_status(job_id, "rejected")
         logger.info(f"Job {job_id}: Rejected by human reviewer")
@@ -393,12 +395,24 @@ def _persist_review_to_db(job_id: str, state: dict):
             ).first()
             if not existing:
                 eval_scores = state.get("evaluation_scores") or {}
+                review_decision = state.get("review_decision", "rejected")
+                
+                # Determine rejection reason based on decision type
+                rejection_reason = None
+                if review_decision == REVIEW_AUTO_REJECTED:
+                    rejection_reason = "llm_guardrail"
+                elif review_decision == REVIEW_REJECTED:
+                    rejection_reason = "human"
+                elif review_decision == REVIEW_TIMEOUT_REJECTED:
+                    rejection_reason = "timeout"
+                
                 db.add(StoryReview(
                     id=uuid.uuid4(),
                     job_id=uuid.UUID(job_id),
                     reviewer_id=state.get("reviewer_id", ""),
-                    decision=state.get("review_decision", "rejected"),
+                    decision=review_decision,
                     comment=state.get("review_comment", ""),
+                    rejection_reason=rejection_reason,
                     guardrail_passed=state.get("guardrail_passed", False),
                     overall_eval_score=eval_scores.get("overall_score"),
                 ))

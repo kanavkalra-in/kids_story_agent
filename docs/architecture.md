@@ -172,7 +172,7 @@ graph TB
 - `story_evaluator`: LLM-based quality scoring (5 dimensions)
 - `story_guardrail`: 3-layer text safety checks
 - `image_guardrail_with_retry`: Vision-based image safety (×N parallel)
-- `video_guardrail_with_retry`: Video prompt + frame sampling (×M parallel)
+- `video_guardrail_with_retry`: Video prompt moderation using text guardrails (×M parallel)
 - `guardrail_aggregator`: Combines all results, makes pass/fail decision
 
 **Parallelism Strategy**:
@@ -197,9 +197,10 @@ def route_to_guardrails(state: StoryState) -> list[Send]:
 **Fan-in to `guardrail_aggregator`**: All guardrail nodes have edges to aggregator → waits for all checks
 
 **Retry Logic**:
-- Image/video guardrails check for hard violations
-- If found → regenerate once and re-check
+- Image guardrails: Vision-based safety check → if hard violation found, regenerate once and re-check
+- Video guardrails: Prompt moderation (text guardrails on Sora prompt) → if hard violation found, regenerate once and re-check
 - If retry also fails → raises `StoryGenerationError` (fails entire job)
+- Note: Video frame sampling is planned but not yet implemented; currently only prompt moderation is used
 
 ### Phase 4: Human Review & Publishing
 
@@ -293,20 +294,59 @@ async def image_generator_node(state: StoryState) -> dict:
 ```python
 async def image_guardrail_with_retry_node(state: StoryState) -> dict:
     image_url = state.get("_guardrail_media_url")
+    image_index = state.get("_guardrail_media_index")
     original_prompt = state.get("_guardrail_original_prompt")
     
     # Check safety
-    violations = await check_image_safety(image_url)
+    safety_output = await check_image_safety_async(image_url, age_group)
+    violations = build_image_violations(safety_output, media_index=image_index, media_type="image")
+    hard_violations = [v for v in violations if v["severity"] == "hard"]
+    
+    # Explicitly clear Pydantic model to prevent serialization issues
+    del safety_output
+    
+    if hard_violations:
+        # Retry: regenerate
+        image_url = await regenerate_image(original_prompt, job_id)
+        safety_output = await check_image_safety_async(image_url, age_group)
+        violations = build_image_violations(safety_output, media_index=image_index, media_type="image")
+        del safety_output
+    
+    return {
+        "guardrail_violations": violations,  # Reducer field
+        "image_urls_final": [{"index": image_index, "url": image_url}],
+        "video_urls_final": [],
+    }
+
+async def video_guardrail_with_retry_node(state: StoryState) -> dict:
+    video_url = state.get("_guardrail_media_url")
+    video_index = state.get("_guardrail_media_index")
+    original_prompt = state.get("_guardrail_original_prompt")
+    
+    # Check safety via prompt moderation (text guardrails on Sora prompt)
+    prompt_safety = await check_text_safety_async(original_prompt, age_group)
+    violations = build_text_violations(prompt_safety, media_type="video", media_index=video_index)
+    del prompt_safety  # Clear Pydantic model
+    
+    # Prefix guardrail names to distinguish from story-level violations
+    for v in violations:
+        v["guardrail_name"] = f"video_prompt_{v['guardrail_name']}"
+    
     hard_violations = [v for v in violations if v["severity"] == "hard"]
     
     if hard_violations:
         # Retry: regenerate
-        image_url = await regenerate_image(original_prompt)
-        violations = await check_image_safety(image_url)
+        video_url = await regenerate_video(original_prompt, job_id)
+        prompt_safety = await check_text_safety_async(original_prompt, age_group)
+        violations = build_text_violations(prompt_safety, media_type="video", media_index=video_index)
+        del prompt_safety
+        for v in violations:
+            v["guardrail_name"] = f"video_prompt_{v['guardrail_name']}"
     
     return {
         "guardrail_violations": violations,  # Reducer field
-        "image_urls_final": [{"index": i, "url": image_url}],
+        "video_urls_final": [{"index": video_index, "url": video_url}],
+        "image_urls_final": [],
     }
 ```
 

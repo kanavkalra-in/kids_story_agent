@@ -81,5 +81,30 @@ class StoryListResponse(BaseModel):
     total: int
 
 
+class RejectedStoryItem(BaseModel):
+    """Summary of a rejected story."""
+    job_id: uuid.UUID
+    story_id: Optional[uuid.UUID] = None
+    story_title: Optional[str] = None
+    story_content: Optional[str] = None
+    age_group: str
+    prompt: str
+    rejection_reason: Optional[str] = None  # "llm_guardrail" / "human" / "timeout"
+    comment: Optional[str] = None
+    reviewer_id: Optional[str] = None
+    created_at: datetime
+    reviewed_at: Optional[datetime] = None
+    image_urls: List[str] = []
+
+    class Config:
+        from_attributes = True
+
+
+class RejectedStoryListResponse(BaseModel):
+    """List of rejected stories."""
+    stories: List[RejectedStoryItem]
+    total: int
+
+
 # Update forward references
 StoryResponse.model_rebuild()

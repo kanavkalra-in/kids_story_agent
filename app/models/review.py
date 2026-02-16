@@ -18,6 +18,7 @@ class StoryReview(Base):
     reviewer_id = Column(String(255), nullable=True)
     decision = Column(String(20), nullable=False)          # approved / rejected / auto_rejected / timeout_rejected
     comment = Column(Text, nullable=True)
+    rejection_reason = Column(String(50), nullable=True)    # "llm_guardrail" / "human" / "timeout"
     guardrail_passed = Column(Boolean, nullable=False, default=True)
     overall_eval_score = Column(Float, nullable=True)
     reviewed_at = Column(DateTime(timezone=True), server_default=func.now())

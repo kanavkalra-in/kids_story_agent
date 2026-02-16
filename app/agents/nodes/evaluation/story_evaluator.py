@@ -89,6 +89,10 @@ def story_evaluator_node(state: StoryState) -> dict:
     age_appropriateness = float(output.age_appropriateness)
     educational_value = float(output.educational_value)
     evaluation_summary = str(output.evaluation_summary)
+    
+    # Explicitly clear the Pydantic model reference immediately after extraction
+    # to prevent serialization issues with LangGraph's checkpointer
+    del output
 
     logger.info(
         f"Job {job_id}: [StoryEval] Output → "
@@ -113,9 +117,6 @@ def story_evaluator_node(state: StoryState) -> dict:
         f"emotional={emotional_positivity}, age={age_appropriateness}, "
         f"edu={educational_value})"
     )
-
-    # Explicitly clear the Pydantic model reference to prevent serialization issues
-    del output
 
     return {
         "evaluation_scores": {

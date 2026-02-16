@@ -242,6 +242,13 @@ async def submit_review_decision(
             detail=f"Job is in '{job.status.value}' state, not 'pending_review'",
         )
 
+    # Validate that comment is provided for human rejections
+    if decision.decision == "rejected" and not decision.comment:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Comment is required when rejecting a story",
+        )
+
     # Resume the interrupted graph
     try:
         from langgraph.types import Command
@@ -302,7 +309,18 @@ async def submit_review_decision(
                 message="Story approved and published successfully",
             )
         else:
-            # Rejected
+            # Rejected - ensure story content is persisted
+            # Import here to avoid circular dependency
+            from app.tasks.story_tasks import _persist_pre_review_data
+            
+            # Persist story content if not already persisted
+            try:
+                _persist_pre_review_data(str(job_id), final_state)
+            except Exception as e:
+                logger.warning(f"Job {job_id}: Failed to persist story content on rejection: {e}")
+                # Continue anyway - story might already be persisted
+            
+            # Create review record
             existing_review = await db.execute(
                 select(StoryReview).where(StoryReview.job_id == job_id)
             )
@@ -313,6 +331,7 @@ async def submit_review_decision(
                     reviewer_id=decision.reviewer_id or "",
                     decision=decision.decision,
                     comment=decision.comment or "",
+                    rejection_reason="human",
                     guardrail_passed=True,
                 ))
 
