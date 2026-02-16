@@ -173,12 +173,11 @@ pip install -r requirements.txt
 # Set up environment
 ./setup_env.sh  # Or manually create .env file
 
-# Start infrastructure
+# Start infrastructure (migrations run automatically)
 docker-compose up -d
-
-# Run migrations
-alembic upgrade head
 ```
+
+**Note**: Database migrations are automatically executed when starting services via Docker. The `migrations` service runs once before the API starts, ensuring your database schema is up-to-date.
 
 ### Configuration
 

@@ -137,7 +137,11 @@ CHECKPOINTER_CONN_STRING=postgresql://user:password@host:5432/kids_story_db
 
 ### Database Migrations
 
-Run Alembic migrations:
+**Automatic Migrations (Recommended for Docker)**:
+When using Docker Compose, migrations run automatically via a dedicated `migrations` service that executes before the API starts. No manual intervention required.
+
+**Manual Migration (For Non-Docker Deployments)**:
+If deploying without Docker, run Alembic migrations manually:
 
 ```bash
 # Set DATABASE_URL environment variable
@@ -150,27 +154,73 @@ alembic upgrade head
 ### Docker Deployment
 
 **Dockerfile**:
+The Dockerfile includes an entrypoint script that automatically runs migrations before starting the application (unless `MIGRATE=false` is set):
+
 ```dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    postgresql-client \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
+# Copy application code
 COPY . .
 
-# Run migrations and start server
-CMD ["sh", "-c", "alembic upgrade head && gunicorn app.main:app -c gunicorn.conf.py"]
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Expose ports
+EXPOSE 8000 8501
+
+# Use entrypoint script (migrations run automatically unless MIGRATE=false)
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["gunicorn", "app.main:app", "-c", "gunicorn.conf.py"]
 ```
 
 **docker-compose.yml**:
+The docker-compose configuration includes a dedicated `migrations` service that runs once before the API starts:
+
 ```yaml
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: kids_story_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrations:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/kids_story_db
+      - MIGRATE=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head"
+    restart: "no"  # Only run once, don't restart on failure
+
   api:
     build: .
     ports:
@@ -180,8 +230,14 @@ services:
       - REDIS_URL=${REDIS_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - API_KEY=${API_KEY}
+      - MIGRATE=false  # Migrations already run by migrations service
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   celery:
@@ -192,7 +248,12 @@ services:
       - REDIS_URL=${REDIS_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   redis:
@@ -200,7 +261,16 @@ services:
     ports:
       - "6379:6379"
     restart: unless-stopped
+
+volumes:
+  postgres_data:
 ```
+
+**Migration Behavior**:
+- The `migrations` service runs once before the API and Celery services start
+- If migrations fail, the API and Celery services won't start (prevents running with outdated schema)
+- The entrypoint script in the Dockerfile provides a fallback: if `MIGRATE=true` (default), it will run migrations before starting the application
+- Set `MIGRATE=false` to skip migrations (useful when using the separate migrations service)
 
 ### Kubernetes Deployment
 
