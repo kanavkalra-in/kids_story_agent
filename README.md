@@ -1,118 +1,199 @@
-# Kids Story Agent
+# 🎨 Kids Story Agent
 
-A scalable FastAPI backend for generating children's stories with AI-generated illustrations and videos. The system uses LangGraph for multi-agent workflow orchestration, Celery for distributed task processing, and supports multiple LLM providers (OpenAI, Anthropic, Ollama).
+> **Enterprise-Grade AI Story Generation Platform with Multi-Layer Safety, Quality Evaluation, and Human-in-the-Loop Review**
 
-## 🎯 Features
+Transform simple prompts into captivating, age-appropriate children's stories with AI-generated illustrations and videos. Built with production-ready guardrails, comprehensive evaluation metrics, and seamless human oversight—ensuring every story meets the highest standards of safety, quality, and educational value.
 
-- **AI Story Generation**: Generate age-appropriate stories (3-5, 6-8, 9-12 years) using GPT-4, Claude, or Ollama
-- **Image Generation**: Create illustrations using DALL-E 3
-- **Video Generation**: Generate short videos using Sora (OpenAI)
-- **Parallel Processing**: LangGraph orchestrates parallel image and video generation
-- **Async Processing**: Celery-based task queue for scalable background processing
-- **Webhook Support**: Get notified when story generation completes
-- **Rate Limiting**: Redis-backed distributed rate limiting
-- **Multiple Storage Options**: Support for local storage or AWS S3 with CloudFront CDN
-- **Scalable Architecture**: Designed to handle high-volume requests
+---
 
-## 🏗️ Architecture
+## ✨ Why Kids Story Agent?
 
-### System Components
+**Most AI story generators are black boxes.** You submit a prompt, get output, and hope it's safe. **Kids Story Agent is different.**
 
-- **FastAPI**: REST API with async support and automatic OpenAPI documentation
-- **LangGraph**: Multi-agent workflow orchestration with parallel execution
-- **Celery + Redis**: Distributed task queue for background processing
-- **PostgreSQL**: Persistent storage for stories, jobs, and metadata
-- **AWS S3 + CloudFront**: Optional cloud storage and CDN for media files
-- **Gunicorn**: Production WSGI server with multiple workers
+We've built a **production-grade AI system** that combines:
 
-### LangGraph Workflow
+- 🛡️ **Multi-Layer Guardrails**: Three-tier safety framework (OpenAI Moderation API, PII detection, custom LLM analysis) that catches issues before they reach children
+- 📊 **Comprehensive Evaluation**: LLM-based quality scoring across 5 dimensions (moral value, theme appropriateness, emotional positivity, age-appropriateness, educational value)
+- 👥 **Human-in-the-Loop**: LangGraph-powered interrupt system for seamless human review and approval workflows
+- 🔄 **Automatic Retry & Regeneration**: Failed guardrail checks trigger intelligent regeneration with exponential backoff
+- ⚡ **Parallel Processing**: LangGraph orchestrates parallel image/video generation, evaluation, and guardrail checks for maximum throughput
+- 🎯 **Age-Appropriate Content**: Specialized prompts and safety checks tuned for three age groups (3-5, 6-8, 9-12 years)
 
-The story generation process follows a sophisticated multi-agent workflow:
+**This isn't just a story generator—it's a complete content safety and quality assurance platform.**
 
+---
+
+## 🏗️ High-Level Architecture
+
+```mermaid
+graph TB
+    subgraph "Application Layer"
+        API[FastAPI REST API<br/>Authentication, Rate Limiting, Request Validation]
+    end
+    
+    subgraph "Task Queue"
+        CELERY[Celery Task Queue<br/>Async Job Processing, Distributed Workers]
+    end
+    
+    subgraph "LangGraph Multi-Agent Workflow"
+        subgraph "Phase 1: Input Moderation"
+            INPUT[Input Moderator<br/>OpenAI Moderation API<br/>Early rejection of unsafe inputs]
+        end
+        
+        subgraph "Phase 2: Content Generation"
+            STORY[Story Writer<br/>LLM: GPT-4/Claude/Ollama]
+            IMG_PROMPT[Image Prompter]
+            VID_PROMPT[Video Prompter]
+            IMG_GEN[Image Generator × N<br/>DALL-E 3, parallel]
+            VID_GEN[Video Generator × M<br/>Sora, parallel]
+            ASSEMBLER[Assembler<br/>Validation, sorting, metadata]
+        end
+        
+        subgraph "Phase 3: Evaluation & Guardrails"
+            EVAL[Story Evaluator<br/>Quality scoring]
+            STORY_GUARD[Story Guardrail<br/>3-layer text safety]
+            IMG_GUARD[Image Guardrail × N<br/>Vision-based, with retry]
+            VID_GUARD[Video Guardrail × M<br/>Prompt + frame sampling]
+            AGGREGATOR[Guardrail Aggregator<br/>Decision logic]
+        end
+        
+        subgraph "Phase 4: Human Review"
+            REVIEW[Human Review Gate<br/>LangGraph Interrupt]
+            PUBLISHER[Publisher<br/>Final persistence]
+        end
+    end
+    
+    subgraph "Storage & Infrastructure"
+        PG[(PostgreSQL<br/>Stories, jobs, evaluations, reviews)]
+        REDIS[(Redis<br/>Rate limiting, job status cache)]
+        S3[AWS S3 + CloudFront<br/>Optional media storage]
+        LOCAL[Local Storage<br/>Development]
+    end
+    
+    API --> CELERY
+    CELERY --> INPUT
+    INPUT --> STORY
+    STORY --> IMG_PROMPT
+    STORY --> VID_PROMPT
+    IMG_PROMPT --> IMG_GEN
+    VID_PROMPT --> VID_GEN
+    IMG_GEN --> ASSEMBLER
+    VID_GEN --> ASSEMBLER
+    ASSEMBLER --> EVAL
+    ASSEMBLER --> STORY_GUARD
+    ASSEMBLER --> IMG_GUARD
+    ASSEMBLER --> VID_GUARD
+    EVAL --> AGGREGATOR
+    STORY_GUARD --> AGGREGATOR
+    IMG_GUARD --> AGGREGATOR
+    VID_GUARD --> AGGREGATOR
+    AGGREGATOR --> REVIEW
+    REVIEW --> PUBLISHER
+    
+    PUBLISHER --> PG
+    API --> REDIS
+    ASSEMBLER --> S3
+    ASSEMBLER --> LOCAL
 ```
-┌──────────────┐
-│ story_writer │
-└──────┬───────┘
-       │
-       ├──────────────┬──────────────┐
-       │              │              │
-       ▼              ▼              ▼
-┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-│image_prompter│ │video_prompter│ │  (parallel) │
-└──────┬───────┘ └──────┬───────┘ └─────────────┘
-       │                │
-       │                │
-       ▼                ▼
-┌─────────────────────────────────────┐
-│   route_to_generators (fan-out)      │
-│  Creates Send instances for each     │
-│  image/video prompt                  │
-└──────┬────────────────┬──────────────┘
-       │                │
-       ▼                ▼
-┌─────────────┐ ┌─────────────┐
-│generate_    │ │generate_    │
-│single_image │ │single_video │
-│  (×N)       │ │  (×M)       │
-└──────┬───────┘ └──────┬───────┘
-       │                │
-       └────────┬───────┘
-                │ (fan-in)
-                ▼
-         ┌──────────┐
-         │assembler │
-         └────┬─────┘
-              │
-              ▼
-            END
-```
 
-**Key Workflow Features:**
+---
 
-1. **Prompter Parallelism**: After story generation, both `image_prompter` and `video_prompter` run in parallel (static edges from `story_writer`)
+## 🎯 Key Features
 
-2. **Dynamic Fan-out**: The `route_to_generators` function creates one `Send` instance per image/video prompt, enabling parallel generation of all media
+### 🛡️ Multi-Layer Guardrails
 
-3. **Automatic Fan-in**: LangGraph automatically waits for all `Send` instances to complete before proceeding to the `assembler` node
+**Layer 0: OpenAI Moderation API** (Fast Pre-Filter)
+- ~50ms latency, zero LLM cost
+- Catches: violence, sexual content, self-harm, hate, harassment
+- Runs on both input prompts and generated content
 
-4. **State Reducers**: Results accumulate via `operator.add` reducers on `image_urls`, `image_metadata`, `video_urls`, and `video_metadata` fields
+**Layer 1: PII Detection** (Regex-Based)
+- Zero-latency detection of emails, phone numbers, SSNs, credit cards
+- Prevents accidental data leakage in stories
 
-5. **Validation & Assembly**: The `assembler` node validates results, sorts by display order, and prepares the final story output
+**Layer 2: Custom LLM Safety Analysis** (Domain-Specific)
+- Fear intensity scoring (0-1 scale)
+- Violence severity assessment
+- Brand mention detection
+- Political/religious content flags
+- Age-group-specific thresholds
 
-See the [Graph Structure](#graph-structure) section below for a visual diagram.
+**Media Guardrails:**
+- Vision-based image safety (NSFW, weapons, realistic children, horror elements)
+- Video prompt moderation + optional frame sampling
+- Automatic regeneration on hard violations (configurable retry limit)
 
-## 📋 Prerequisites
+### 📊 Comprehensive Evaluation
+
+Every story receives a **structured quality score** across 5 dimensions:
+
+1. **Moral Score** (1-10): Does the story teach positive values?
+2. **Theme Appropriateness** (1-10): Is the theme suitable for the age group?
+3. **Emotional Positivity** (1-10): Does it evoke warmth and joy?
+4. **Age Appropriateness** (1-10): Is vocabulary/complexity right for the age?
+5. **Educational Value** (1-10): Does the child learn something valuable?
+
+**Weighted Overall Score**: Combines all dimensions with configurable weights for final quality assessment.
+
+### 👥 Human-in-the-Loop Review
+
+- **LangGraph Interrupt System**: Graph execution pauses at review gate
+- **State Persistence**: Full workflow state saved to PostgreSQL checkpointer
+- **Review API**: RESTful endpoints for listing, viewing, and approving/rejecting content
+- **Timeout Handling**: Auto-reject after configurable days (default: 3)
+- **Review Package**: Includes story, evaluation scores, guardrail results, and media
+
+### ⚡ Advanced Parallelism
+
+**LangGraph Native Parallelism:**
+- Static edges: `image_prompter` and `video_prompter` run simultaneously
+- Dynamic fan-out: One `Send` instance per image/video prompt → parallel generation
+- Guardrail fan-out: All evaluation and guardrail checks run concurrently
+- Automatic fan-in: Framework waits for all parallel tasks before proceeding
+
+**Result**: Maximum throughput with minimal latency.
+
+### 🔄 Intelligent Retry & Regeneration
+
+- **Automatic Retry**: Failed guardrail checks trigger single regeneration attempt
+- **Exponential Backoff**: Video polling uses configurable backoff strategy
+- **Error Handling**: Graceful degradation with detailed error messages
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
 
 - Python 3.11+
 - PostgreSQL 15+
 - Redis 7+
-- AWS S3 bucket (optional, for cloud storage)
-- API Keys:
-  - OpenAI API key (required for DALL-E 3 and Sora)
-  - Anthropic API key (optional, if using Claude)
-  - AWS credentials (optional, if using S3)
+- OpenAI API key (for DALL-E 3 and Sora)
+- Optional: AWS credentials (for S3 storage)
 
-## 🚀 Quick Start
-
-### 1. Clone and Install Dependencies
+### Installation
 
 ```bash
+# Clone repository
+git clone <repository-url>
 cd kids_story_agent
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Set up environment
+./setup_env.sh  # Or manually create .env file
+
+# Start infrastructure
+docker-compose up -d
+
+# Run migrations
+alembic upgrade head
 ```
 
-### 2. Environment Configuration
+### Configuration
 
-Create a `.env` file in the project root:
-
-```bash
-# Use the setup script
-./setup_env.sh
-
-# Or manually create .env with:
-```
-
-**Required Configuration:**
+Create a `.env` file:
 
 ```env
 # Database
@@ -121,56 +202,30 @@ DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/kids_story_db
 # Redis
 REDIS_URL=redis://localhost:6379/0
 
-# LLM Provider (choose one: openai, anthropic, ollama)
+# LLM Provider (openai, anthropic, or ollama)
 LLM_PROVIDER=openai
-OPENAI_API_KEY=your_openai_api_key_here
-# ANTHROPIC_API_KEY=your_anthropic_api_key_here  # If using Anthropic
-# OLLAMA_BASE_URL=http://localhost:11434  # If using Ollama
-# OLLAMA_MODEL=llama3.2  # If using Ollama
+OPENAI_API_KEY=sk-...
 
-# Storage (choose: s3 or local)
+# Storage (s3 or local)
 STORAGE_TYPE=local
 LOCAL_STORAGE_PATH=storage/images
 LOCAL_VIDEO_STORAGE_PATH=storage/videos
 
-# AWS S3 (if using cloud storage)
-# AWS_ACCESS_KEY_ID=your_access_key
-# AWS_SECRET_ACCESS_KEY=your_secret_key
-# AWS_REGION=us-east-1
-# S3_BUCKET_NAME=kids-stories-media
-# CLOUDFRONT_DOMAIN=your-cloudfront-domain.cloudfront.net
-
 # API Settings
-API_KEY=your_api_key_here  # Optional, leave empty to disable auth
+API_KEY=your_api_key_here
 RATE_LIMIT_PER_MINUTE=100
-MAX_REQUEST_SIZE_MB=10
 
-# CORS (comma-separated origins, or "*" for all)
-CORS_ORIGINS=*
+# Guardrail Settings
+GUARDRAIL_FEAR_THRESHOLD=0.4
+GUARDRAIL_VIOLENCE_HARD_THRESHOLD=0.6
+MEDIA_GUARDRAIL_MAX_RETRIES=1
+GUARDRAIL_AUTO_REJECT_ON_HARD_FAIL=true
 
-# Environment
-ENVIRONMENT=development
+# Human Review
+REVIEW_TIMEOUT_DAYS=3
 ```
 
-### 3. Start Infrastructure
-
-Start PostgreSQL and Redis using Docker Compose:
-
-```bash
-docker-compose up -d
-```
-
-This will start:
-- PostgreSQL on port 5432
-- Redis on port 6379
-
-### 4. Run Database Migrations
-
-```bash
-alembic upgrade head
-```
-
-### 5. Start Services
+### Start Services
 
 **Terminal 1 - Celery Worker:**
 ```bash
@@ -189,14 +244,10 @@ gunicorn app.main:app -c gunicorn.conf.py
 **Terminal 3 - Streamlit UI (Optional):**
 ```bash
 ./run_streamlit.sh
-# Or: streamlit run streamlit_app.py
 ```
 
-Then open http://localhost:8501 in your browser.
+### Verify Installation
 
-### 6. Verify Installation
-
-Check the API health:
 ```bash
 curl http://localhost:8000/health
 ```
@@ -205,38 +256,40 @@ View API documentation:
 - Swagger UI: http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
 
-## 📚 API Documentation
+---
 
-### Authentication
+## 📚 Documentation
 
-All endpoints require API key authentication via the `Authorization` header:
+Comprehensive documentation is available in the `/docs` folder:
 
-```http
-Authorization: Bearer your_api_key_here
+- **[Architecture Deep Dive](docs/architecture.md)**: Detailed system design, LangGraph workflow, and component interactions
+- **[Guardrails & Safety](docs/guardrails.md)**: Multi-layer safety framework, violation handling, and configuration
+- **[Evaluation System](docs/evaluation.md)**: Quality scoring methodology, metrics, and interpretation
+- **[Human-in-the-Loop](docs/human-review.md)**: Review workflow, API usage, and timeout handling
+- **[API Reference](docs/api-reference.md)**: Complete endpoint documentation with examples
+- **[Deployment Guide](docs/deployment.md)**: Production deployment, scaling, and monitoring
+- **[Development Guide](docs/development.md)**: Contributing, testing, and code quality
+
+---
+
+## 🎨 Usage Examples
+
+### Generate a Story
+
+```bash
+curl -X POST http://localhost:8000/api/v1/stories/generate \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key" \
+  -d '{
+    "prompt": "A brave little mouse goes on an adventure to find a magical cheese",
+    "age_group": "6-8",
+    "num_illustrations": 3,
+    "generate_images": true,
+    "generate_videos": false
+  }'
 ```
 
-Or set `API_KEY` in `.env` to enable authentication. Leave it empty to disable (not recommended for production).
-
-### Generate Story
-
-Create a new story generation job:
-
-```http
-POST /api/v1/stories/generate
-Content-Type: application/json
-Authorization: Bearer your_api_key
-
-{
-  "prompt": "A brave little mouse goes on an adventure to find a magical cheese",
-  "age_group": "6-8",
-  "num_illustrations": 3,
-  "generate_images": true,
-  "generate_videos": false,
-  "webhook_url": "https://your-app.com/webhook"  # Optional
-}
-```
-
-**Response (202 Accepted):**
+**Response:**
 ```json
 {
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -245,434 +298,181 @@ Authorization: Bearer your_api_key
 }
 ```
 
-**Request Parameters:**
-- `prompt` (string, required): Story prompt/idea
-- `age_group` (string, required): One of `"3-5"`, `"6-8"`, `"9-12"`
-- `num_illustrations` (integer, required): Number of images/videos to generate (1-10)
-- `generate_images` (boolean, optional): Enable image generation (default: true)
-- `generate_videos` (boolean, optional): Enable video generation (default: false)
-- `webhook_url` (string, optional): URL to receive completion notification
-
 ### Check Job Status
 
-Get the status of a story generation job:
-
-```http
-GET /api/v1/stories/jobs/{job_id}
-Authorization: Bearer your_api_key
-```
-
-**Response:**
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "completed",
-  "story_id": "660e8400-e29b-41d4-a716-446655440001",
-  "error": null,
-  "created_at": "2024-01-01T00:00:00Z",
-  "updated_at": "2024-01-01T00:01:00Z"
-}
-```
-
-**Status Values:**
-- `pending`: Job is queued
-- `processing`: Story generation in progress
-- `completed`: Story ready
-- `failed`: Generation failed (check `error` field)
-
-### Get Story
-
-Retrieve a completed story:
-
-```http
-GET /api/v1/stories/{story_id}
-Authorization: Bearer your_api_key
-```
-
-**Response:**
-```json
-{
-  "id": "660e8400-e29b-41d4-a716-446655440001",
-  "title": "The Brave Little Mouse",
-  "content": "Once upon a time, in a cozy little house...",
-  "age_group": "6-8",
-  "prompt": "A brave little mouse goes on an adventure",
-  "created_at": "2024-01-01T00:00:00Z",
-  "images": [
-    {
-      "id": "770e8400-e29b-41d4-a716-446655440002",
-      "image_url": "http://localhost:8000/api/v1/stories/images/stories/.../image.png",
-      "prompt_used": "A brave little mouse standing at the edge of a magical forest...",
-      "scene_description": "The mouse begins its adventure",
-      "display_order": 0
-    }
-  ],
-  "videos": [
-    {
-      "id": "880e8400-e29b-41d4-a716-446655440003",
-      "video_url": "http://localhost:8000/api/v1/stories/videos/stories/.../video.mp4",
-      "prompt_used": "A brave little mouse running through a magical forest...",
-      "scene_description": "The mouse runs through the forest",
-      "display_order": 0
-    }
-  ]
-}
-```
-
-**Note:** You can use either `story_id` or `job_id` in the URL path.
-
-### Regenerating the Graph Diagram
-
-To regenerate the graph structure diagram:
-
-```bash
-python generate_graph_diagram.py
-```
-
-This creates `docs/graph_structure.svg`. To convert to PNG, install dependencies:
-```bash
-pip install cairosvg pillow
-```
-
-The script will automatically generate a PNG version if these packages are available.
-
-### List Stories
-
-Get a paginated list of all completed stories:
-
-```http
-GET /api/v1/stories?limit=10&offset=0
-Authorization: Bearer your_api_key
-```
-
-**Response:**
-```json
-{
-  "stories": [
-    {
-      "id": "660e8400-e29b-41d4-a716-446655440001",
-      "title": "The Brave Little Mouse",
-      "age_group": "6-8",
-      "prompt": "A brave little mouse goes on an adventure",
-      "created_at": "2024-01-01T00:00:00Z",
-      "num_images": 3
-    }
-  ],
-  "total": 42
-}
-```
-
-### Serve Media Files
-
-Images and videos are served via dedicated endpoints:
-
-```http
-GET /api/v1/stories/images/{file_path}
-GET /api/v1/stories/videos/{file_path}
-```
-
-**Example:**
-```
-GET /api/v1/stories/images/stories/{story_id}/{image_id}.png
-GET /api/v1/stories/videos/stories/{story_id}/{video_id}.mp4
-```
-
-## 🎨 Graph Structure
-
-The LangGraph workflow orchestrates the story generation process through a series of interconnected nodes:
-
-![Graph Structure](docs/graph_structure.svg)
-
-**Node Descriptions:**
-
-1. **story_writer**: Generates the story text and title based on the user prompt and age group
-2. **image_prompter**: Extracts key scenes and creates DALL-E-optimized image prompts (runs in parallel with video_prompter)
-3. **video_prompter**: Extracts key scenes and creates Sora-optimized video prompts (runs in parallel with image_prompter)
-4. **route_to_generators**: Fan-out function that creates `Send` instances for each image/video prompt
-5. **generate_single_image**: Generates a single image using DALL-E 3 (executed N times in parallel)
-6. **generate_single_video**: Generates a single video using Sora (executed M times in parallel)
-7. **assembler**: Validates results, sorts by display order, and prepares final output
-
-**Parallelism Strategy:**
-
-- **Static Parallelism**: `image_prompter` and `video_prompter` run simultaneously after story generation
-- **Dynamic Parallelism**: Each image/video prompt triggers a separate `Send` instance, enabling parallel generation of all media
-- **Automatic Synchronization**: LangGraph waits for all parallel tasks to complete before proceeding to the assembler
-
-## 🔧 Configuration
-
-### Environment Variables
-
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql+asyncpg://...` | Yes |
-| `REDIS_URL` | Redis connection string | `redis://localhost:6379/0` | Yes |
-| `LLM_PROVIDER` | LLM provider: `openai`, `anthropic`, or `ollama` | `ollama` | Yes |
-| `OPENAI_API_KEY` | OpenAI API key (for DALL-E, Sora, or OpenAI stories) | - | If using OpenAI |
-| `ANTHROPIC_API_KEY` | Anthropic API key | - | If using Anthropic |
-| `OLLAMA_BASE_URL` | Ollama server URL | `http://localhost:11434` | If using Ollama |
-| `OLLAMA_MODEL` | Ollama model name | `llama3.2` | If using Ollama |
-| `STORAGE_TYPE` | Storage backend: `s3` or `local` | `local` | Yes |
-| `LOCAL_STORAGE_PATH` | Local image storage path | `storage/images` | If using local |
-| `LOCAL_VIDEO_STORAGE_PATH` | Local video storage path | `storage/videos` | If using local |
-| `AWS_ACCESS_KEY_ID` | AWS access key | - | If using S3 |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key | - | If using S3 |
-| `S3_BUCKET_NAME` | S3 bucket name | `kids-stories-media` | If using S3 |
-| `CLOUDFRONT_DOMAIN` | CloudFront CDN domain | - | Optional |
-| `API_KEY` | API authentication key | - | Optional |
-| `RATE_LIMIT_PER_MINUTE` | Rate limit per minute | `100` | No |
-| `MAX_REQUEST_SIZE_MB` | Maximum request body size | `10` | No |
-| `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | - | No |
-| `ENVIRONMENT` | Environment: `development` or `production` | `development` | No |
-
-### LLM Provider Configuration
-
-**OpenAI:**
-```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-```
-
-**Anthropic:**
-```env
-LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-**Ollama (Local):**
-```env
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
-```
-
-### Storage Configuration
-
-**Local Storage:**
-```env
-STORAGE_TYPE=local
-LOCAL_STORAGE_PATH=storage/images
-LOCAL_VIDEO_STORAGE_PATH=storage/videos
-```
-
-**AWS S3:**
-```env
-STORAGE_TYPE=s3
-AWS_ACCESS_KEY_ID=your_access_key
-AWS_SECRET_ACCESS_KEY=your_secret_key
-AWS_REGION=us-east-1
-S3_BUCKET_NAME=kids-stories-media
-CLOUDFRONT_DOMAIN=your-domain.cloudfront.net  # Optional
-```
-
-## 🧪 Testing
-
-### Using Streamlit UI
-
-The included Streamlit interface provides an easy way to test the API:
-
-1. Start the API server (see [Quick Start](#-quick-start))
-2. Start Streamlit:
-   ```bash
-   ./run_streamlit.sh
-   ```
-3. Open http://localhost:8501
-4. Use the interface to:
-   - Generate stories with different prompts
-   - Check job status with auto-polling
-   - View completed stories with images and videos
-
-### Using cURL
-
-**Generate a story:**
-```bash
-curl -X POST http://localhost:8000/api/v1/stories/generate \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer your_api_key" \
-  -d '{
-    "prompt": "A magical forest adventure",
-    "age_group": "6-8",
-    "num_illustrations": 3,
-    "generate_images": true,
-    "generate_videos": false
-  }'
-```
-
-**Check status:**
 ```bash
 curl http://localhost:8000/api/v1/stories/jobs/{job_id} \
   -H "Authorization: Bearer your_api_key"
 ```
 
-**Get story:**
+**Status Values:**
+- `pending`: Job is queued
+- `processing`: Generation in progress
+- `pending_review`: Awaiting human approval
+- `completed`: Story ready
+- `failed`: Generation failed
+
+### Review Pending Content
+
+```bash
+# List pending reviews
+curl http://localhost:8000/api/v1/reviews/pending \
+  -H "Authorization: Bearer your_api_key"
+
+# Get review details
+curl http://localhost:8000/api/v1/reviews/{job_id} \
+  -H "Authorization: Bearer your_api_key"
+
+# Approve/Reject
+curl -X POST http://localhost:8000/api/v1/reviews/{job_id}/decision \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key" \
+  -d '{
+    "decision": "approved",
+    "comment": "Looks great!",
+    "reviewer_id": "reviewer_123"
+  }'
+```
+
+### Get Completed Story
+
 ```bash
 curl http://localhost:8000/api/v1/stories/{story_id} \
   -H "Authorization: Bearer your_api_key"
 ```
 
-## 🛠️ Development
+**Response includes:**
+- Story text and title
+- Evaluation scores (moral, theme, emotional, age, educational)
+- Guardrail summary and violations
+- Image/video URLs with metadata
+- Review decision and comments
 
-### Project Structure
+---
 
-```
-kids_story_agent/
-├── app/
-│   ├── agents/          # LangGraph workflow nodes
-│   │   ├── graph.py     # Workflow definition
-│   │   ├── state.py     # State schema
-│   │   ├── story_writer.py
-│   │   ├── image_prompter.py
-│   │   ├── video_prompter.py
-│   │   ├── image_generator.py
-│   │   ├── video_generator.py
-│   │   └── assembler.py
-│   ├── api/             # FastAPI routes
-│   │   ├── stories.py
-│   │   └── auth.py
-│   ├── db/              # Database session management
-│   ├── models/          # SQLAlchemy models
-│   ├── schemas/         # Pydantic schemas
-│   ├── services/        # External service clients
-│   │   ├── llm.py
-│   │   ├── openai_client.py
-│   │   ├── s3.py
-│   │   └── redis_client.py
-│   ├── tasks/           # Celery tasks
-│   ├── utils/           # Utility functions
-│   ├── config.py        # Configuration
-│   └── main.py          # FastAPI app
-├── alembic/             # Database migrations
-├── storage/             # Local file storage
-├── docs/                # Documentation
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
-```
+## 🏛️ System Components
 
-### Running Tests
+### Core Technologies
+
+- **FastAPI**: High-performance async REST API
+- **LangGraph**: Multi-agent workflow orchestration with native parallelism
+- **Celery + Redis**: Distributed task queue for background processing
+- **PostgreSQL**: Persistent storage with asyncpg driver
+- **OpenAI APIs**: DALL-E 3 (images), Sora (videos), Moderation API (safety)
+- **Pydantic**: Type-safe data validation and structured LLM outputs
+
+### AI/ML Components
+
+- **LLM Providers**: OpenAI GPT-4, Anthropic Claude, Ollama (local)
+- **Image Generation**: DALL-E 3 with optimized prompts
+- **Video Generation**: Sora with async polling and exponential backoff
+- **Safety Moderation**: OpenAI Moderation API + custom LLM analysis
+- **Quality Evaluation**: Structured LLM outputs with weighted scoring
+
+### Infrastructure
+
+- **Storage**: Local filesystem or AWS S3 with CloudFront CDN
+- **Rate Limiting**: Redis-backed distributed rate limiting
+- **State Management**: PostgreSQL checkpointer for LangGraph interrupts
+- **Monitoring**: Structured logging, error tracking, job status cache
+
+---
+
+## 🔒 Security & Safety
+
+### Content Safety
+
+- **Input Moderation**: All user prompts checked before generation
+- **Output Guardrails**: Multi-layer safety checks on all generated content
+- **PII Detection**: Prevents accidental data leakage
+- **Age-Appropriate Filtering**: Specialized checks for each age group
+
+### API Security
+
+- **API Key Authentication**: Bearer token authentication
+- **Rate Limiting**: Configurable per-minute limits
+- **CORS Protection**: Configurable origin whitelist
+- **Request Size Limits**: Prevents DoS attacks
+- **SSRF Protection**: Webhook URL validation
+
+### Data Privacy
+
+- **No Data Retention**: Generated content stored only as configured
+- **Secure Storage**: S3 encryption, local file permissions
+- **Audit Trail**: Review decisions and guardrail violations logged
+
+---
+
+## 📊 Monitoring & Observability
+
+### Logging
+
+- Structured logging with job IDs for traceability
+- Log levels: INFO (workflow progress), WARNING (guardrail violations), ERROR (failures)
+- All guardrail checks and evaluations logged with details
+
+### Metrics to Monitor
+
+- **API**: Response times, error rates, request throughput
+- **Celery**: Task queue length, worker health, execution times
+- **Guardrails**: Violation rates, retry counts, auto-reject rates
+- **Evaluation**: Average quality scores, score distributions
+- **Review**: Pending review count, average review time, approval rates
+
+### Health Checks
 
 ```bash
-# Run tests (when available)
-pytest
-
-# Run with coverage
-pytest --cov=app --cov-report=html
+curl http://localhost:8000/health
 ```
 
-### Code Quality
-
-```bash
-# Linting
-ruff check app/
-
-# Format code
-black app/
-
-# Type checking
-mypy app/
-```
-
-### Database Migrations
-
-```bash
-# Create a new migration
-alembic revision --autogenerate -m "description"
-
-# Apply migrations
-alembic upgrade head
-
-# Rollback one migration
-alembic downgrade -1
-```
+---
 
 ## 🚀 Production Deployment
 
-### 1. Environment Setup
+See [Deployment Guide](docs/deployment.md) for detailed instructions.
 
-Set production environment variables:
-```env
-ENVIRONMENT=production
-API_KEY=strong_random_api_key_here
-CORS_ORIGINS=https://yourdomain.com
-```
+**Quick Checklist:**
+- [ ] Set `ENVIRONMENT=production`
+- [ ] Configure strong `API_KEY`
+- [ ] Set explicit `CORS_ORIGINS` (avoid `*`)
+- [ ] Use managed PostgreSQL (AWS RDS, Google Cloud SQL)
+- [ ] Configure S3 storage with CloudFront CDN
+- [ ] Set up monitoring and alerting
+- [ ] Run multiple Gunicorn workers and Celery workers
+- [ ] Configure reverse proxy (nginx/Traefik)
 
-### 2. Database
+---
 
-Use managed PostgreSQL (AWS RDS, Google Cloud SQL, etc.) or run PostgreSQL in production:
-```bash
-# Run migrations
-alembic upgrade head
-```
+## 🤝 Contributing
 
-### 3. Start Services
+Contributions are welcome! Please see [Development Guide](docs/development.md) for:
+- Code quality standards (ruff, black, mypy)
+- Testing guidelines
+- Database migration process
+- Pull request workflow
 
-**API Server (Gunicorn):**
-```bash
-gunicorn app.main:app -c gunicorn.conf.py
-```
-
-**Celery Worker:**
-```bash
-celery -A app.celery_app worker --concurrency=4 --loglevel=info
-```
-
-**Celery Beat (if using scheduled tasks):**
-```bash
-celery -A app.celery_app beat --loglevel=info
-```
-
-### 4. Reverse Proxy
-
-Use nginx or Traefik in front of Gunicorn:
-
-**nginx example:**
-```nginx
-server {
-    listen 80;
-    server_name yourdomain.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
-
-### 5. Monitoring
-
-Monitor:
-- **Celery**: Task queue length, worker health, task execution times
-- **API**: Response times, error rates, request throughput
-- **External APIs**: Rate limits for OpenAI/Anthropic
-- **Database**: Connection pool, query performance
-- **Redis**: Memory usage, connection count
-
-### 6. Scaling
-
-- **Horizontal Scaling**: Run multiple Gunicorn workers and Celery workers
-- **Load Balancing**: Use a load balancer (nginx, AWS ALB) in front of multiple API instances
-- **Database**: Use connection pooling and read replicas for high read loads
-- **Redis**: Use Redis Cluster for high availability
-
-## 🔒 Security Considerations
-
-1. **API Authentication**: Always set `API_KEY` in production
-2. **CORS**: Configure `CORS_ORIGINS` explicitly (avoid `*` in production)
-3. **Rate Limiting**: Adjust `RATE_LIMIT_PER_MINUTE` based on your needs
-4. **Input Validation**: All inputs are validated and sanitized
-5. **SSRF Protection**: Webhook URLs are validated to prevent SSRF attacks
-6. **Path Traversal**: File serving endpoints prevent directory traversal
-7. **Request Size Limits**: `MAX_REQUEST_SIZE_MB` prevents DoS attacks
+---
 
 ## 📝 License
 
 MIT
 
-## 🤝 Contributing
+---
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+## 🆘 Support
 
-## 📧 Support
+- **Documentation**: See `/docs` folder for detailed guides
+- **Issues**: Open a GitHub issue for bugs or feature requests
+- **API Docs**: Interactive Swagger UI at `/docs` endpoint
 
-For issues and questions, please open an issue on GitHub.
+---
+
+## 🎓 Learn More
+
+- **LangGraph**: [Official Documentation](https://langchain-ai.github.io/langgraph/)
+- **FastAPI**: [Official Documentation](https://fastapi.tiangolo.com/)
+- **Celery**: [Official Documentation](https://docs.celeryq.dev/)
+
+---
+
+**Built with ❤️ for safe, high-quality children's content generation.**
