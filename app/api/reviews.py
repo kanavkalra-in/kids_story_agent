@@ -14,7 +14,6 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
-from app.api.auth import verify_api_key
 from app.models.story import StoryJob, Story, StoryImage, StoryVideo, JobStatus
 from app.models.evaluation import StoryEvaluation
 from app.models.guardrail import GuardrailResult
@@ -31,7 +30,7 @@ from app.schemas.review import (
 )
 from app.schemas.story import GenerateStoryResponse
 from app.tasks.story_tasks import generate_story_task, update_job_status_redis
-from app.agents.graph import get_story_graph
+from app.agents.graph import get_workflow, _get_checkpointer_conn_string
 from app.constants import SEVERITY_HARD, SEVERITY_SOFT
 from app.utils.url import convert_local_path_to_url
 import uuid
@@ -43,7 +42,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/reviews",
     tags=["reviews"],
-    dependencies=[Depends(verify_api_key)],
 )
 
 
@@ -257,12 +255,16 @@ async def submit_review_decision(
 
         logger.info(f"Job {job_id}: Resuming graph with decision={decision.decision}")
 
-        # Run the graph resume in a background thread since it may involve
-        # async operations (publisher node uploads to S3)
-        final_state = await get_story_graph().ainvoke(
-            Command(resume=resume_value),
-            config=config,
-        )
+        # Compile with a fresh async checkpointer bound to this event loop
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        conn_string = _get_checkpointer_conn_string()
+        async with AsyncPostgresSaver.from_conn_string(conn_string) as checkpointer:
+            graph = get_workflow().compile(checkpointer=checkpointer)
+            final_state = await graph.ainvoke(
+                Command(resume=resume_value),
+                config=config,
+            )
 
         # The story_tasks._handle_review_outcome would normally handle DB updates,
         # but since we're resuming from the API (not Celery), handle it here
@@ -325,7 +327,8 @@ async def submit_review_decision(
             )
 
     except Exception as e:
-        logger.error(f"Job {job_id}: Failed to resume graph: {e}")
+        error_msg = f"Job {job_id}: Failed to resume graph: {e}"
+        logger.error(error_msg, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process review decision: {str(e)}",

@@ -12,16 +12,16 @@ from app.db.session import Base
 
 
 class JobStatus(str, enum.Enum):
-    PENDING = "pending"
-    PROCESSING = "processing"
-    GUARDRAIL_CHECK = "guardrail_check"
-    PENDING_REVIEW = "pending_review"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    AUTO_REJECTED = "auto_rejected"
-    PUBLISHED = "published"
-    COMPLETED = "completed"
-    FAILED = "failed"
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    GUARDRAIL_CHECK = "GUARDRAIL_CHECK"
+    PENDING_REVIEW = "PENDING_REVIEW"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    AUTO_REJECTED = "AUTO_REJECTED"
+    PUBLISHED = "PUBLISHED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
 
 class StoryJob(Base):

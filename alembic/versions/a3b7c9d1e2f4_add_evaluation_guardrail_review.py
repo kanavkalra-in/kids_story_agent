@@ -35,62 +35,101 @@ def upgrade() -> None:
             op.execute(f"ALTER TYPE jobstatus ADD VALUE IF NOT EXISTS '{status}'")
 
     # -- 2. Add parent_job_id column to story_jobs --
-    op.add_column('story_jobs', sa.Column(
-        'parent_job_id', postgresql.UUID(as_uuid=True),
-        sa.ForeignKey('story_jobs.id'), nullable=True,
-    ))
+    # Check if column exists first using raw SQL
+    conn = op.get_bind()
+    result = conn.execute(sa.text("""
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'story_jobs' AND column_name = 'parent_job_id'
+    """))
+    if result.fetchone() is None:
+        op.add_column('story_jobs', sa.Column(
+            'parent_job_id', postgresql.UUID(as_uuid=True),
+            sa.ForeignKey('story_jobs.id'), nullable=True,
+        ))
 
     # -- 3. Create story_evaluations table --
-    op.create_table(
-        'story_evaluations',
-        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column('job_id', postgresql.UUID(as_uuid=True),
-                  sa.ForeignKey('story_jobs.id'), nullable=False, unique=True),
-        sa.Column('moral_score', sa.Float, nullable=False),
-        sa.Column('theme_appropriateness', sa.Float, nullable=False),
-        sa.Column('emotional_positivity', sa.Float, nullable=False),
-        sa.Column('age_appropriateness', sa.Float, nullable=False),
-        sa.Column('educational_value', sa.Float, nullable=False),
-        sa.Column('overall_score', sa.Float, nullable=False),
-        sa.Column('evaluation_summary', sa.Text, nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True),
-                  server_default=sa.func.now()),
-    )
+    # Check if table exists first (for cases where tables were created manually)
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = 'story_evaluations'
+        )
+    """))
+    table_exists = result.scalar()
+    
+    if not table_exists:
+        op.create_table(
+            'story_evaluations',
+            sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+            sa.Column('job_id', postgresql.UUID(as_uuid=True),
+                      sa.ForeignKey('story_jobs.id'), nullable=False, unique=True),
+            sa.Column('moral_score', sa.Float, nullable=False),
+            sa.Column('theme_appropriateness', sa.Float, nullable=False),
+            sa.Column('emotional_positivity', sa.Float, nullable=False),
+            sa.Column('age_appropriateness', sa.Float, nullable=False),
+            sa.Column('educational_value', sa.Float, nullable=False),
+            sa.Column('overall_score', sa.Float, nullable=False),
+            sa.Column('evaluation_summary', sa.Text, nullable=True),
+            sa.Column('created_at', sa.DateTime(timezone=True),
+                      server_default=sa.func.now()),
+        )
 
     # -- 4. Create guardrail_results table --
-    op.create_table(
-        'guardrail_results',
-        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column('job_id', postgresql.UUID(as_uuid=True),
-                  sa.ForeignKey('story_jobs.id'), nullable=False),
-        sa.Column('guardrail_name', sa.String(100), nullable=False),
-        sa.Column('media_type', sa.String(20), nullable=False),
-        sa.Column('media_index', sa.Integer, nullable=True),
-        sa.Column('severity', sa.String(20), nullable=False),
-        sa.Column('confidence', sa.Float, nullable=False),
-        sa.Column('detail', sa.Text, nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True),
-                  server_default=sa.func.now()),
-    )
-    op.create_index('ix_guardrail_results_guardrail_name',
-                    'guardrail_results', ['guardrail_name'])
-    op.create_index('ix_guardrail_results_job_id',
-                    'guardrail_results', ['job_id'])
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = 'guardrail_results'
+        )
+    """))
+    table_exists = result.scalar()
+    
+    if not table_exists:
+        op.create_table(
+            'guardrail_results',
+            sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+            sa.Column('job_id', postgresql.UUID(as_uuid=True),
+                      sa.ForeignKey('story_jobs.id'), nullable=False),
+            sa.Column('guardrail_name', sa.String(100), nullable=False),
+            sa.Column('media_type', sa.String(20), nullable=False),
+            sa.Column('media_index', sa.Integer, nullable=True),
+            sa.Column('severity', sa.String(20), nullable=False),
+            sa.Column('confidence', sa.Float, nullable=False),
+            sa.Column('detail', sa.Text, nullable=True),
+            sa.Column('created_at', sa.DateTime(timezone=True),
+                      server_default=sa.func.now()),
+        )
+        op.create_index('ix_guardrail_results_guardrail_name',
+                        'guardrail_results', ['guardrail_name'])
+        op.create_index('ix_guardrail_results_job_id',
+                        'guardrail_results', ['job_id'])
 
     # -- 5. Create story_reviews table --
-    op.create_table(
-        'story_reviews',
-        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column('job_id', postgresql.UUID(as_uuid=True),
-                  sa.ForeignKey('story_jobs.id'), nullable=False, unique=True),
-        sa.Column('reviewer_id', sa.String(255), nullable=True),
-        sa.Column('decision', sa.String(20), nullable=False),
-        sa.Column('comment', sa.Text, nullable=True),
-        sa.Column('guardrail_passed', sa.Boolean, nullable=False, server_default='true'),
-        sa.Column('overall_eval_score', sa.Float, nullable=True),
-        sa.Column('reviewed_at', sa.DateTime(timezone=True),
-                  server_default=sa.func.now()),
-    )
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = 'story_reviews'
+        )
+    """))
+    table_exists = result.scalar()
+    
+    if not table_exists:
+        op.create_table(
+            'story_reviews',
+            sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+            sa.Column('job_id', postgresql.UUID(as_uuid=True),
+                      sa.ForeignKey('story_jobs.id'), nullable=False, unique=True),
+            sa.Column('reviewer_id', sa.String(255), nullable=True),
+            sa.Column('decision', sa.String(20), nullable=False),
+            sa.Column('comment', sa.Text, nullable=True),
+            sa.Column('guardrail_passed', sa.Boolean, nullable=False, server_default='true'),
+            sa.Column('overall_eval_score', sa.Float, nullable=True),
+            sa.Column('reviewed_at', sa.DateTime(timezone=True),
+                      server_default=sa.func.now()),
+        )
 
 
 def downgrade() -> None:

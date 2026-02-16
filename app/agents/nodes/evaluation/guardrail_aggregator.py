@@ -85,6 +85,26 @@ def guardrail_aggregator_node(state: StoryState) -> dict:
         f"{len(image_finals)} images, {len(video_finals)} videos"
     )
 
+    if hard_violations:
+        for v in hard_violations:
+            logger.warning(
+                f"Job {job_id}: [Aggregator] HARD violation — "
+                f"[{v.get('guardrail_name', '?')}] "
+                f"({v.get('media_type', '?')}#{v.get('media_index', '?')}) "
+                f"confidence={v.get('confidence', 0):.2f}: {v.get('detail', '')}"
+            )
+
+    if soft_violations:
+        for v in soft_violations:
+            logger.info(
+                f"Job {job_id}: [Aggregator] SOFT warning — "
+                f"[{v.get('guardrail_name', '?')}] "
+                f"({v.get('media_type', '?')}#{v.get('media_index', '?')}): "
+                f"{v.get('detail', '')}"
+            )
+
+    logger.info(f"Job {job_id}: [Aggregator] Full summary:\n{chr(10).join(summary_parts)}")
+
     return {
         "guardrail_passed": passed,
         "guardrail_summary": "\n".join(summary_parts),

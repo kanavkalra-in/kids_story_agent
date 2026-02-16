@@ -115,6 +115,10 @@ async def _check_video_safety(
     violations = []
 
     # 1. Prompt moderation (text guardrails on the Sora prompt)
+    logger.info(
+        f"Job {job_id}: [VideoSafety] Checking video {video_index} prompt — "
+        f"age_group={age_group}, prompt={prompt[:300]}"
+    )
     prompt_safety = await check_text_safety_async(prompt, age_group)
     prompt_violations = build_text_violations(
         prompt_safety, media_type="video", media_index=video_index,
@@ -123,6 +127,13 @@ async def _check_video_safety(
     for v in prompt_violations:
         v["guardrail_name"] = f"video_prompt_{v['guardrail_name']}"
     violations.extend(prompt_violations)
+    if prompt_violations:
+        logger.warning(
+            f"Job {job_id}: [VideoSafety] Video {video_index} prompt FLAGGED — "
+            f"{'; '.join(v['detail'] for v in prompt_violations)}"
+        )
+    else:
+        logger.info(f"Job {job_id}: [VideoSafety] Video {video_index} prompt passed")
 
     # 2. Frame sampling moderation (if enabled and LLM supports vision)
     if settings.video_frame_sampling_enabled and settings.llm_provider in ("openai", "anthropic"):
@@ -154,7 +165,10 @@ async def video_guardrail_with_retry_node(state: StoryState) -> dict:
     age_group = state.get("age_group", "6-8")
 
     # ── Attempt 1: Check original video ──
-    logger.info(f"Job {job_id}: Checking video {video_index} safety (attempt 1/2)")
+    logger.info(
+        f"Job {job_id}: Checking video {video_index} safety (attempt 1/2) — "
+        f"url={video_url}, prompt={original_prompt[:200]}"
+    )
 
     violations = await _check_video_safety(job_id, original_prompt, video_index, age_group)
     hard_violations = [v for v in violations if v["severity"] == SEVERITY_HARD]
@@ -172,8 +186,9 @@ async def video_guardrail_with_retry_node(state: StoryState) -> dict:
 
     # ── Attempt 2: Regenerate and re-check (single retry) ──
     logger.warning(
-        f"Job {job_id}: Video {video_index} failed guardrails "
-        f"({len(hard_violations)} hard violations), regenerating..."
+        f"Job {job_id}: Video {video_index} FAILED guardrails "
+        f"({len(hard_violations)} hard violations): "
+        f"{'; '.join(v['detail'] for v in hard_violations)} — regenerating..."
     )
     video_url = await _regenerate_single_video(original_prompt, job_id)
     logger.info(f"Job {job_id}: Video {video_index} regenerated → {video_url}")

@@ -204,10 +204,28 @@ def check_text_safety(text: str, age_group: str = "6-8") -> TextSafetyOutput:
 
     llm = get_llm()
     structured_llm = llm.with_structured_output(TextSafetyOutput)
+
+    system_prompt = TEXT_SAFETY_SYSTEM_PROMPT.format(age_group=age_group)
+    logger.info(
+        f"[TextSafety] Prompt → system: {system_prompt[:200]}... | "
+        f"text ({len(text)} chars): {text[:300]}..."
+    )
+
     output = structured_llm.invoke([
-        SystemMessage(content=TEXT_SAFETY_SYSTEM_PROMPT.format(age_group=age_group)),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=text),
     ])
+
+    logger.info(
+        f"[TextSafety] Output → violence={output.violence_detected} "
+        f"(severity={output.violence_severity:.2f}), "
+        f"fear={output.fear_intensity:.2f}, "
+        f"political={output.political_content_detected}, "
+        f"brands={output.brand_mentions_found}, "
+        f"religious={output.religious_references_detected}, "
+        f"explanation={output.overall_explanation}"
+    )
+
     return output
 
 
@@ -240,21 +258,41 @@ def _check_image_via_vision_llm(image_url: str, age_group: str) -> ImageSafetyOu
     """Use the existing LLM (GPT-4o / Claude) with vision input."""
     from app.services.llm import get_llm
 
+    system_prompt = IMAGE_SAFETY_SYSTEM_PROMPT.format(age_group=age_group)
+    logger.info(
+        f"[ImageSafety] Prompt → system: {system_prompt[:200]}... | "
+        f"image_url: {image_url}"
+    )
+
     llm = get_llm()
     structured_llm = llm.with_structured_output(ImageSafetyOutput)
     output = structured_llm.invoke([
-        SystemMessage(content=IMAGE_SAFETY_SYSTEM_PROMPT.format(age_group=age_group)),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=[
             {"type": "text", "text": "Analyze this image for children's content safety:"},
             {"type": "image_url", "image_url": {"url": image_url}},
         ]),
     ])
+
+    logger.info(
+        f"[ImageSafety] Output → safe={output.is_safe_for_children}, "
+        f"nsfw={output.nsfw_detected} ({output.nsfw_confidence:.2f}), "
+        f"weapon={output.weapon_detected} ({output.weapon_confidence:.2f}), "
+        f"realistic_child={output.realistic_human_child} ({output.realistic_child_confidence:.2f}), "
+        f"horror={output.horror_elements} ({output.horror_confidence:.2f}), "
+        f"explanation={output.explanation}"
+    )
+
     return output
 
 
 def _check_image_via_omni_moderation(image_url: str) -> ImageSafetyOutput:
     """OpenAI omni-moderation API for LLMs without vision support."""
     from app.services.openai_client import get_openai_client
+
+    logger.info(
+        f"[ImageSafety-OmniMod] Prompt → image_url: {image_url}"
+    )
 
     client = get_openai_client()
     moderation = client.moderations.create(
@@ -265,7 +303,7 @@ def _check_image_via_omni_moderation(image_url: str) -> ImageSafetyOutput:
     cats = result.categories
     scores = result.category_scores
 
-    return ImageSafetyOutput(
+    output = ImageSafetyOutput(
         nsfw_detected=getattr(cats, "sexual", False) or getattr(cats, "sexual_minors", False),
         nsfw_confidence=max(
             getattr(scores, "sexual", 0.0),
@@ -285,6 +323,15 @@ def _check_image_via_omni_moderation(image_url: str) -> ImageSafetyOutput:
         ]),
         explanation="Checked via OpenAI omni-moderation API",
     )
+
+    logger.info(
+        f"[ImageSafety-OmniMod] Output → safe={output.is_safe_for_children}, "
+        f"nsfw={output.nsfw_detected} ({output.nsfw_confidence:.2f}), "
+        f"weapon={output.weapon_detected} ({output.weapon_confidence:.2f}), "
+        f"horror={output.horror_elements} ({output.horror_confidence:.2f})"
+    )
+
+    return output
 
 
 # ═══════════════════════════════════════════════════════════════════════════

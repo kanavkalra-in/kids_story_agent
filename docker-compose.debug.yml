@@ -1,0 +1,73 @@
+version: '3.8'
+
+# Debug override file - extends docker-compose.yml
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.debug.yml up
+
+services:
+  api:
+    # Override volumes to include source code for hot reload
+    volumes:
+      - ./storage:/app/storage
+      - .:/app  # Mount source code for hot reload
+    
+    # Override environment variables for debug mode
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/kids_story_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - ENVIRONMENT=development
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - LOG_LEVEL=debug  # Enable debug logging
+    
+    # Override command to use uvicorn with hot reload
+    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+    
+    # Expose debug port for remote debugging (optional)
+    ports:
+      - "8000:8000"
+      - "5678:5678"  # Debug port (for debugpy if needed)
+
+  celery:
+    # Override volumes to include source code
+    volumes:
+      - ./storage:/app/storage
+      - .:/app  # Mount source code
+    
+    # Override environment for debug logging
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/kids_story_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ENVIRONMENT=development
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - LOG_LEVEL=debug
+      - PYTHONUNBUFFERED=1  # Ensure Python output is unbuffered for debugging
+    
+    # OPTION 1: Use debugpy for remote debugging (RECOMMENDED)
+    # This allows VS Code/PyCharm to attach and hit breakpoints
+    # Make sure debugpy is installed: pip install debugpy
+    command: python -m debugpy --listen 0.0.0.0:5679 --wait-for-client -m celery -A app.celery_app worker --pool=solo --loglevel=debug --concurrency=1
+    
+    # OPTION 2: Use pdb/ipdb for interactive debugging (uncomment to use)
+    # command: celery -A app.celery_app worker --pool=solo --loglevel=debug --concurrency=1
+    
+    # OPTION 3: Use threads pool (sometimes works better than solo)
+    # command: celery -A app.celery_app worker --pool=threads --loglevel=debug --concurrency=1
+    
+    # Expose debug port for remote debugging
+    ports:
+      - "5679:5679"  # Debug port for Celery (attach debugger to localhost:5679)
+
+  streamlit:
+    # Override volumes to include source code for hot reload
+    volumes:
+      - .:/app  # Mount source code
+    
+    # Streamlit already has auto-reload, but we can enable debug mode
+    environment:
+      - API_BASE_URL=http://api:8000
+      - LOG_LEVEL=debug

@@ -40,24 +40,45 @@ def story_guardrail_node(state: StoryState) -> dict:
     age_group = state.get("age_group", "6-8")
     violations = []
 
-    logger.info(f"Job {job_id}: Running story text guardrails (3-layer pipeline)")
+    logger.info(
+        f"Job {job_id}: Running story text guardrails (3-layer pipeline) "
+        f"on story ({len(story_text)} chars, age_group={age_group}): "
+        f"{story_text[:300]}..."
+    )
 
     # ── Layer 0: OpenAI Moderation API (fast) ──
     openai_violations = check_openai_moderation(story_text)
     violations.extend(openai_violations)
     if openai_violations:
-        logger.warning(f"Job {job_id}: OpenAI Moderation flagged story text")
+        logger.warning(
+            f"Job {job_id}: [L0-OpenAI] FLAGGED — "
+            f"{'; '.join(v['detail'] for v in openai_violations)}"
+        )
+    else:
+        logger.info(f"Job {job_id}: [L0-OpenAI] Passed")
 
     # ── Layer 1: PII detection (regex) ──
     pii_violations = detect_pii(story_text)
     violations.extend(pii_violations)
     if pii_violations:
-        logger.warning(f"Job {job_id}: PII detected — {len(pii_violations)} violation(s)")
+        logger.warning(
+            f"Job {job_id}: [L1-PII] FLAGGED — "
+            f"{'; '.join(v['detail'] for v in pii_violations)}"
+        )
+    else:
+        logger.info(f"Job {job_id}: [L1-PII] Passed")
 
     # ── Layer 2: LLM deep safety analysis ──
     text_safety = check_text_safety(story_text, age_group)
     text_violations = build_text_violations(text_safety, media_type="story")
     violations.extend(text_violations)
+    if text_violations:
+        logger.warning(
+            f"Job {job_id}: [L2-LLM] FLAGGED — "
+            f"{'; '.join(v['detail'] for v in text_violations)}"
+        )
+    else:
+        logger.info(f"Job {job_id}: [L2-LLM] Passed")
 
     hard_count = sum(1 for v in violations if v["severity"] == "hard")
     soft_count = sum(1 for v in violations if v["severity"] == "soft")

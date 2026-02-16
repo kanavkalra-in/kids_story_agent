@@ -68,37 +68,64 @@ def story_evaluator_node(state: StoryState) -> dict:
     llm = get_llm()
     structured_llm = llm.with_structured_output(StoryEvalOutput)
 
+    system_prompt = EVAL_SYSTEM_PROMPT.format(age_group=age_group)
+    human_content = f"Title: {story_title}\n\n{story_text}"
+    logger.info(
+        f"Job {job_id}: [StoryEval] Prompt → system: {system_prompt[:200]}... | "
+        f"story ({len(story_text)} chars): {story_text[:300]}..."
+    )
+
     messages = [
-        SystemMessage(content=EVAL_SYSTEM_PROMPT.format(age_group=age_group)),
-        HumanMessage(content=f"Title: {story_title}\n\n{story_text}"),
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_content),
     ]
     output = structured_llm.invoke(messages)
 
+    # Immediately convert Pydantic model to plain Python types to avoid serialization issues
+    # with LangGraph's checkpointer. Extract all values before building return dict.
+    moral_score = float(output.moral_score)
+    theme_appropriateness = float(output.theme_appropriateness)
+    emotional_positivity = float(output.emotional_positivity)
+    age_appropriateness = float(output.age_appropriateness)
+    educational_value = float(output.educational_value)
+    evaluation_summary = str(output.evaluation_summary)
+
+    logger.info(
+        f"Job {job_id}: [StoryEval] Output → "
+        f"moral={moral_score}, theme={theme_appropriateness}, "
+        f"emotional={emotional_positivity}, age={age_appropriateness}, "
+        f"edu={educational_value}, "
+        f"summary={evaluation_summary}"
+    )
+
     overall = round(
-        output.moral_score * EVAL_WEIGHTS["moral"]
-        + output.theme_appropriateness * EVAL_WEIGHTS["theme"]
-        + output.emotional_positivity * EVAL_WEIGHTS["emotional"]
-        + output.age_appropriateness * EVAL_WEIGHTS["age"]
-        + output.educational_value * EVAL_WEIGHTS["edu"],
+        moral_score * EVAL_WEIGHTS["moral"]
+        + theme_appropriateness * EVAL_WEIGHTS["theme"]
+        + emotional_positivity * EVAL_WEIGHTS["emotional"]
+        + age_appropriateness * EVAL_WEIGHTS["age"]
+        + educational_value * EVAL_WEIGHTS["edu"],
         2,
     )
 
     logger.info(
         f"Job {job_id}: Evaluation complete — overall score {overall}/10 "
-        f"(moral={output.moral_score}, theme={output.theme_appropriateness}, "
-        f"emotional={output.emotional_positivity}, age={output.age_appropriateness}, "
-        f"edu={output.educational_value})"
+        f"(moral={moral_score}, theme={theme_appropriateness}, "
+        f"emotional={emotional_positivity}, age={age_appropriateness}, "
+        f"edu={educational_value})"
     )
+
+    # Explicitly clear the Pydantic model reference to prevent serialization issues
+    del output
 
     return {
         "evaluation_scores": {
-            "moral_score": output.moral_score,
-            "theme_appropriateness": output.theme_appropriateness,
-            "emotional_positivity": output.emotional_positivity,
-            "age_appropriateness": output.age_appropriateness,
-            "educational_value": output.educational_value,
+            "moral_score": moral_score,
+            "theme_appropriateness": theme_appropriateness,
+            "emotional_positivity": emotional_positivity,
+            "age_appropriateness": age_appropriateness,
+            "educational_value": educational_value,
             "overall_score": overall,
-            "evaluation_summary": output.evaluation_summary,
+            "evaluation_summary": evaluation_summary,
         },
         # Evaluator produces no violations — return empty lists for reducers
         "guardrail_violations": [],

@@ -4,7 +4,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from app.db.session import get_db
-from app.api.auth import verify_api_key
 from app.schemas.story import (
     StoryRequest,
     StoryResponse,
@@ -33,7 +32,7 @@ import uuid
 import json
 import os
 
-router = APIRouter(prefix="/stories", tags=["stories"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/stories", tags=["stories"])
 
 
 

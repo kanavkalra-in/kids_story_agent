@@ -87,6 +87,8 @@ def generate_media_prompts(
     structured_llm = llm.with_structured_output(ScenesOutput)
     output = structured_llm.invoke(messages)
     
+    # Immediately convert Pydantic model to plain Python types to avoid serialization issues
+    # with LangGraph's checkpointer. Extract data before any state operations.
     scenes = output.scenes
     
     # Validate we got the right number of scenes
@@ -99,10 +101,14 @@ def generate_media_prompts(
         scenes = scenes[:num_items]
     
     # Extract prompts and descriptions as separate parallel lists.
+    # Convert to plain strings immediately to ensure no Pydantic model references remain.
     # Descriptions are stored in a non-reducer state field so they don't
     # accumulate with the generator metadata (which uses operator.add).
-    prompts = [scene.prompt for scene in scenes]
-    descriptions = [scene.description for scene in scenes]
+    prompts = [str(scene.prompt) for scene in scenes]
+    descriptions = [str(scene.description) for scene in scenes]
+    
+    # Explicitly clear the Pydantic model reference to prevent serialization issues
+    del output
     
     logger.info(f"Job {job_id}: Successfully generated {len(prompts)} {media_type} prompts")
     

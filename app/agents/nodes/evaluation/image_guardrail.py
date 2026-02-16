@@ -85,7 +85,10 @@ async def image_guardrail_with_retry_node(state: StoryState) -> dict:
     age_group = state.get("age_group", "6-8")
 
     # ── Attempt 1: Check original image ──
-    logger.info(f"Job {job_id}: Checking image {image_index} safety (attempt 1/2)")
+    logger.info(
+        f"Job {job_id}: Checking image {image_index} safety (attempt 1/2) — "
+        f"url={image_url}, age_group={age_group}, prompt={original_prompt[:200]}"
+    )
 
     safety_output = await check_image_safety_async(image_url, age_group)
     violations = build_image_violations(safety_output, media_index=image_index, media_type="image")
@@ -104,8 +107,9 @@ async def image_guardrail_with_retry_node(state: StoryState) -> dict:
 
     # ── Attempt 2: Regenerate and re-check (single retry) ──
     logger.warning(
-        f"Job {job_id}: Image {image_index} failed guardrails "
-        f"({len(hard_violations)} hard violations), regenerating..."
+        f"Job {job_id}: Image {image_index} FAILED guardrails "
+        f"({len(hard_violations)} hard violations): "
+        f"{'; '.join(v['detail'] for v in hard_violations)} — regenerating..."
     )
     image_url = await _regenerate_single_image(original_prompt, job_id)
     logger.info(f"Job {job_id}: Image {image_index} regenerated → {image_url}")

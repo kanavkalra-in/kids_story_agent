@@ -22,3 +22,5 @@ python-multipart
 streamlit
 requests
 gtts
+debugpy
+ipdb

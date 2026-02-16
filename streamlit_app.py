@@ -22,6 +22,7 @@ API_BASE_URL = st.sidebar.text_input(
     help="Base URL of the Kids Story Agent API"
 )
 
+
 st.set_page_config(
     page_title="Kids Story Agent - Test UI",
     page_icon="📚",
@@ -534,7 +535,10 @@ with tab5:
     def fetch_pending_reviews():
         """Fetch stories pending human review from the API."""
         try:
-            resp = requests.get(f"{API_BASE_URL}/api/v1/reviews/pending", timeout=10)
+            resp = requests.get(
+                f"{API_BASE_URL}/api/v1/reviews/pending",
+                timeout=10
+            )
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.RequestException as e:
@@ -544,7 +548,10 @@ with tab5:
     def fetch_review_detail(job_id: str):
         """Fetch the full review package for a story."""
         try:
-            resp = requests.get(f"{API_BASE_URL}/api/v1/reviews/{job_id}", timeout=10)
+            resp = requests.get(
+                f"{API_BASE_URL}/api/v1/reviews/{job_id}",
+                timeout=10
+            )
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.RequestException as e:

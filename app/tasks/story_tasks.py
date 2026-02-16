@@ -153,9 +153,16 @@ async def _generate_story_async(job_id: str, task_id: str) -> dict[str, Any]:
     except GraphInterrupt:
         # LangGraph raises GraphInterrupt when interrupt() is called
         logger.info(f"Job {job_id}: Graph interrupted for human review")
+        # Persist pre-review data - if this fails, raise the error (no silent failures)
         _persist_pre_review_data(job_id, initial_state)
         update_job_status(job_id, "pending_review")
         return {"job_id": job_id, "status": "pending_review"}
+    except Exception as e:
+        # Catch any other exceptions (including Pydantic serialization errors)
+        error_msg = f"Unexpected error during story generation: {str(e)}"
+        logger.error(f"Job {job_id}: {error_msg}", exc_info=True)
+        update_job_status(job_id, "failed", error_msg)
+        return {"job_id": job_id, "status": "failed", "error": error_msg}
 
     # Check if the graph was interrupted (for human review)
     # This happens when interrupt() is called — the graph returns partial state
@@ -164,6 +171,7 @@ async def _generate_story_async(job_id: str, task_id: str) -> dict[str, Any]:
     if review_decision is None:
         # Graph was interrupted — waiting for human review
         logger.info(f"Job {job_id}: Awaiting human review")
+        # Persist pre-review data - if this fails, raise the error (no silent failures)
         _persist_pre_review_data(job_id, final_state)
         update_job_status(job_id, "pending_review")
         return {"job_id": job_id, "status": "pending_review"}
@@ -176,13 +184,18 @@ def _persist_pre_review_data(job_id: str, state: dict):
     """
     Persist story, evaluation, and guardrail data to DB before human review.
     This ensures the reviewer can see the data even if the Celery worker restarts.
+    
+    Raises:
+        Exception: If persistence fails, the exception is re-raised to ensure
+                   the error is not silently ignored.
     """
     try:
         with get_sync_db() as db:
             job = db.query(StoryJob).filter(StoryJob.id == uuid.UUID(job_id)).first()
             if not job:
-                logger.error(f"Job {job_id} not found for pre-review persistence")
-                return
+                error_msg = f"Job {job_id} not found for pre-review persistence"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
 
             _ensure_story_persisted(db, job, state)
             _ensure_evaluation_persisted(db, job, state)
@@ -192,7 +205,9 @@ def _persist_pre_review_data(job_id: str, state: dict):
             logger.info(f"Job {job_id}: Pre-review data persisted to DB")
 
     except Exception as e:
-        logger.error(f"Job {job_id}: Failed to persist pre-review data: {e}")
+        error_msg = f"Job {job_id}: Failed to persist pre-review data: {e}"
+        logger.error(error_msg, exc_info=True)
+        raise  # Re-raise to ensure error is not silently ignored
 
 
 def _ensure_story_persisted(db, job, state: dict):
@@ -327,7 +342,13 @@ def _handle_review_outcome(
 
 
 def _persist_review_to_db(job_id: str, state: dict):
-    """Persist review decision to the database."""
+    """
+    Persist review decision to the database.
+    
+    Raises:
+        Exception: If persistence fails, the exception is re-raised to ensure
+                   the error is not silently ignored.
+    """
     try:
         with get_sync_db() as db:
             existing = db.query(StoryReview).filter(
@@ -346,7 +367,9 @@ def _persist_review_to_db(job_id: str, state: dict):
                 ))
                 db.commit()
     except Exception as e:
-        logger.error(f"Job {job_id}: Failed to persist review: {e}")
+        error_msg = f"Job {job_id}: Failed to persist review: {e}"
+        logger.error(error_msg, exc_info=True)
+        raise  # Re-raise to ensure error is not silently ignored
 
 
 def _persist_story_to_db(job_id: str, state: dict) -> str:

@@ -266,33 +266,18 @@ def route_after_review(state: StoryState) -> str:
 # Graph construction
 # ---------------------------------------------------------------------------
 
-def _get_checkpointer():
-    """
-    Create a PostgresSaver checkpointer for interrupt() support.
-
-    PostgresSaver is required for human-in-the-loop workflows to survive
-    worker restarts. Raises on connection errors — ensure PostgreSQL
-    is running and the connection string is valid.
-    """
-    from langgraph.checkpoint.postgres import PostgresSaver
-
+def _get_checkpointer_conn_string() -> str:
+    """Return the PostgreSQL connection string for the checkpointer."""
     conn_string = settings.checkpointer_conn_string
-
     if not conn_string:
-        # Derive sync connection string from async database_url
-        # asyncpg → psycopg2 for the checkpointer
         conn_string = settings.database_url.replace(
             "postgresql+asyncpg://", "postgresql://"
         )
-
-    checkpointer = PostgresSaver.from_conn_string(conn_string)
-    checkpointer.setup()
-    logger.info("Using PostgresSaver checkpointer for human-in-the-loop support")
-    return checkpointer
+    return conn_string
 
 
-def create_story_graph() -> StateGraph:
-    """Build and compile the LangGraph workflow with evaluation, guardrails, and HITL."""
+def _build_workflow() -> StateGraph:
+    """Build the LangGraph workflow structure (nodes + edges, no compilation)."""
 
     workflow = StateGraph(StoryState)
 
@@ -368,33 +353,42 @@ def create_story_graph() -> StateGraph:
     workflow.add_edge("mark_auto_rejected", END)
     workflow.add_edge("mark_rejected", END)
 
-    # ── Compile with checkpointer for interrupt() support ──
-    checkpointer = _get_checkpointer()
-    return workflow.compile(checkpointer=checkpointer)
+    return workflow
 
 
-# Lazy-initialized graph singleton — avoids connecting to PostgreSQL at import time
-_story_graph = None
+# Cached workflow structure — nodes and edges are event-loop-agnostic
+_workflow: StateGraph | None = None
 
 
-def get_story_graph():
-    """Get or create the compiled story graph (lazy singleton)."""
-    global _story_graph
-    if _story_graph is None:
-        _story_graph = create_story_graph()
-    return _story_graph
+def get_workflow() -> StateGraph:
+    """Get or create the workflow graph structure (lazy singleton)."""
+    global _workflow
+    if _workflow is None:
+        _workflow = _build_workflow()
+    return _workflow
 
 
 async def run_story_generation(initial_state: StoryState, thread_id: str = None) -> StoryState:
     """
     Invoke the compiled story graph asynchronously.
 
+    A fresh AsyncPostgresSaver is created per invocation so the connection
+    is always bound to the current event loop (important for Celery workers
+    that call asyncio.run() per task).
+
     Args:
         initial_state: The initial state dict for the workflow
         thread_id: Unique thread ID for checkpointing (defaults to job_id).
                    Required for interrupt()/resume to work correctly.
     """
-    graph = get_story_graph()
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    workflow = get_workflow()
     tid = thread_id or initial_state.get("job_id", "unknown")
     config = {"configurable": {"thread_id": tid}}
-    return await graph.ainvoke(initial_state, config=config)
+    conn_string = _get_checkpointer_conn_string()
+
+    async with AsyncPostgresSaver.from_conn_string(conn_string) as checkpointer:
+        graph = workflow.compile(checkpointer=checkpointer)
+        logger.info("Using AsyncPostgresSaver checkpointer for human-in-the-loop support")
+        return await graph.ainvoke(initial_state, config=config)
