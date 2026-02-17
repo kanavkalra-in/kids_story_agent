@@ -37,6 +37,12 @@ This blog post covers production-grade AI architecture. Here are the **essential
 - **Checkpointing**: PostgreSQL-based state persistence for seamless resume
 - **Non-blocking review**: Human oversight integrated into async workflows
 
+### **Evaluation & Quality Metrics**
+- **LLM-based evaluation**: Using LLMs to score content quality across multiple dimensions
+- **Multi-dimensional scoring**: Moral, theme, emotional, age, and educational value scores
+- **Weighted overall scores**: Combining evaluation dimensions with configurable weights
+- **Structured evaluation outputs**: Pydantic models ensuring consistent quality metrics
+
 ### **Production Patterns**
 - **Prompt engineering**: Domain-specific prompts for children's content safety
 - **Retry logic**: Self-correction with single-attempt regeneration
@@ -68,13 +74,13 @@ Our guardrail system implements a **cascading filter architecture** where each l
 
 ```mermaid
 graph TB
-    subgraph Layer0["Layer 0: OpenAI Moderation API (~50ms, $0)"]
-        L0["OpenAI Moderation API"]
-        L0_V["Violence detection"]
-        L0_S["Sexual content detection"]
-        L0_SH["Self-harm detection"]
-        L0_H["Hate speech detection"]
-        L0_HR["Harassment detection"]
+    subgraph Layer0["Layer 0: OpenAI Moderation API"]
+        L0[OpenAI Moderation API]
+        L0_V[Violence detection]
+        L0_S[Sexual content detection]
+        L0_SH[Self-harm detection]
+        L0_H[Hate speech detection]
+        L0_HR[Harassment detection]
         L0 --> L0_V
         L0 --> L0_S
         L0 --> L0_SH
@@ -82,25 +88,25 @@ graph TB
         L0 --> L0_HR
     end
     
-    subgraph Layer1["Layer 1: PII Detection (regex, ~0ms, $0)"]
-        L1["PII Detection"]
-        L1_E["Email addresses"]
-        L1_P["Phone numbers"]
-        L1_SSN["Social Security Numbers"]
-        L1_CC["Credit card numbers"]
+    subgraph Layer1["Layer 1: PII Detection"]
+        L1[PII Detection]
+        L1_E[Email addresses]
+        L1_P[Phone numbers]
+        L1_SSN[Social Security Numbers]
+        L1_CC[Credit card numbers]
         L1 --> L1_E
         L1 --> L1_P
         L1 --> L1_SSN
         L1 --> L1_CC
     end
     
-    subgraph Layer2["Layer 2: Custom LLM Safety Analysis (~2-3s, ~$0.01)"]
-        L2["Custom LLM Analysis"]
-        L2_F["Fear intensity scoring 0-1"]
-        L2_V["Violence severity assessment 0-1"]
-        L2_B["Brand mention detection"]
-        L2_P["Political content flags"]
-        L2_R["Religious references"]
+    subgraph Layer2["Layer 2: Custom LLM Safety Analysis"]
+        L2[Custom LLM Analysis]
+        L2_F[Fear intensity scoring]
+        L2_V[Violence severity assessment]
+        L2_B[Brand mention detection]
+        L2_P[Political content flags]
+        L2_R[Religious references]
         L2 --> L2_F
         L2 --> L2_V
         L2 --> L2_B
@@ -108,10 +114,10 @@ graph TB
         L2 --> L2_R
     end
     
-    STORY["Story Text"] --> L0
+    STORY[Story Text] --> L0
     L0 -->|Pass| L1
     L1 -->|Pass| L2
-    L2 --> RESULT["Guardrail Result<br/>Hard/Soft Violations"]
+    L2 --> RESULT[Guardrail Result]
     
     style L0 fill:#90EE90
     style L1 fill:#87CEEB
@@ -190,41 +196,41 @@ All guardrail results flow into an **aggregator node** that:
 
 ```mermaid
 graph TB
-    START([User Request]) --> INPUT["input_moderator<br/>OpenAI Moderation API<br/>~50ms"]
-    INPUT --> CHECK_INPUT{"Input safe?"}
-    CHECK_INPUT -->|No| AUTO_REJECT1["mark_auto_rejected<br/>END"]
-    CHECK_INPUT -->|Yes| STORY["story_writer<br/>LLM Generation"]
+    START([User Request]) --> INPUT[input_moderator]
+    INPUT --> CHECK_INPUT{Input safe?}
+    CHECK_INPUT -->|No| AUTO_REJECT1[mark_auto_rejected]
+    CHECK_INPUT -->|Yes| STORY[story_writer]
     AUTO_REJECT1 --> END1([END])
     
-    STORY --> IMG_PROMPT["image_prompter<br/>Parallel"]
-    STORY --> VID_PROMPT["video_prompter<br/>Parallel"]
+    STORY --> IMG_PROMPT[image_prompter]
+    STORY --> VID_PROMPT[video_prompter]
     
-    IMG_PROMPT --> IMG_GEN["generate_single_image<br/>N instances<br/>Dynamic Send"]
-    VID_PROMPT --> VID_GEN["generate_single_video<br/>M instances<br/>Dynamic Send"]
+    IMG_PROMPT --> IMG_GEN[generate_single_image]
+    VID_PROMPT --> VID_GEN[generate_single_video]
     
-    IMG_GEN --> ASSEMBLER["assembler<br/>Fan-in"]
+    IMG_GEN --> ASSEMBLER[assembler]
     VID_GEN --> ASSEMBLER
     
-    ASSEMBLER --> ROUTE["route_to_guardrails<br/>Fan-out"]
+    ASSEMBLER --> ROUTE[route_to_guardrails]
     
-    ROUTE --> EVAL["story_evaluator<br/>Quality Scoring"]
-    ROUTE --> STORY_GUARD["story_guardrail<br/>3-Layer Text Safety"]
-    ROUTE --> IMG_GUARD["image_guardrail<br/>Vision-based<br/>N instances"]
-    ROUTE --> VID_GUARD["video_guardrail<br/>Prompt Moderation<br/>M instances"]
+    ROUTE --> EVAL[story_evaluator]
+    ROUTE --> STORY_GUARD[story_guardrail]
+    ROUTE --> IMG_GUARD[image_guardrail]
+    ROUTE --> VID_GUARD[video_guardrail]
     
-    EVAL --> AGGREGATOR["guardrail_aggregator<br/>Fan-in"]
+    EVAL --> AGGREGATOR[guardrail_aggregator]
     STORY_GUARD --> AGGREGATOR
     IMG_GUARD --> AGGREGATOR
     VID_GUARD --> AGGREGATOR
     
-    AGGREGATOR --> CHECK_VIOLATIONS{"Hard violations?"}
-    CHECK_VIOLATIONS -->|Yes| AUTO_REJECT2["mark_auto_rejected<br/>END"]
-    CHECK_VIOLATIONS -->|No| REVIEW["human_review_gate<br/>LangGraph interrupt()"]
+    AGGREGATOR --> CHECK_VIOLATIONS{Hard violations?}
+    CHECK_VIOLATIONS -->|Yes| AUTO_REJECT2[mark_auto_rejected]
+    CHECK_VIOLATIONS -->|No| REVIEW[human_review_gate]
     AUTO_REJECT2 --> END2([END])
     
-    REVIEW --> CHECK_DECISION{"Human Decision?"}
-    CHECK_DECISION -->|approved| PUBLISHER["publisher<br/>Final Persistence"]
-    CHECK_DECISION -->|rejected| REJECT["mark_rejected<br/>END"]
+    REVIEW --> CHECK_DECISION{Human Decision?}
+    CHECK_DECISION -->|approved| PUBLISHER[publisher]
+    CHECK_DECISION -->|rejected| REJECT[mark_rejected]
     PUBLISHER --> END3([END])
     REJECT --> END4([END])
     
@@ -394,35 +400,35 @@ When guardrails detect hard violations in media (images/videos), we don't just f
 ```mermaid
 graph TB
     subgraph App["Application Layer"]
-        API["FastAPI REST API"]
-        CELERY["Celery Task Queue"]
-        UI["Streamlit UI<br/>optional"]
+        API[FastAPI REST API]
+        CELERY[Celery Task Queue]
+        UI[Streamlit UI]
     end
     
     subgraph Orchestration["Orchestration Layer"]
-        GRAPH["LangGraph StateGraph"]
-        CHECKPOINT["PostgreSQL Checkpointer<br/>for interrupts"]
-        STATE["State Management<br/>StoryState TypedDict"]
+        GRAPH[LangGraph StateGraph]
+        CHECKPOINT[PostgreSQL Checkpointer]
+        STATE[State Management]
     end
     
     subgraph Agents["Agent Layer"]
-        GEN["Generation Agents"]
-        EVAL_AGENTS["Evaluation Agents"]
-        GUARD_AGENTS["Guardrail Agents"]
-        REVIEW_AGENTS["Review Agents"]
+        GEN[Generation Agents]
+        EVAL_AGENTS[Evaluation Agents]
+        GUARD_AGENTS[Guardrail Agents]
+        REVIEW_AGENTS[Review Agents]
     end
     
     subgraph Services["Service Layer"]
-        LLM["LLM Service<br/>OpenAI/Anthropic/Ollama"]
-        MOD["Moderation Service<br/>OpenAI Moderation API"]
-        STORAGE["Storage Service<br/>Local/S3"]
-        REDIS_SVC["Redis Client<br/>rate limiting, caching"]
+        LLM[LLM Service]
+        MOD[Moderation Service]
+        STORAGE[Storage Service]
+        REDIS_SVC[Redis Client]
     end
     
     subgraph Infrastructure["Infrastructure Layer"]
-        PG[("PostgreSQL<br/>persistent storage")]
-        REDIS_INF[("Redis<br/>task queue, rate limiting")]
-        S3["AWS S3<br/>optional media storage"]
+        PG[(PostgreSQL)]
+        REDIS_INF[(Redis)]
+        S3[AWS S3]
     end
     
     API --> GRAPH
