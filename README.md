@@ -36,24 +36,26 @@ graph TB
     end
     
     subgraph Workflow["LangGraph Multi-Agent Workflow"]
-        INPUT["Input Moderator<br/>OpenAI Moderation API"]
-        STORY["Story Writer<br/>LLM: GPT-4/Claude/Ollama"]
-        IMG_PROMPT["Image Prompter"]
-        VID_PROMPT["Video Prompter"]
-        IMG_GEN["Image Generator N instances<br/>DALL-E 3, parallel"]
-        VID_GEN["Video Generator M instances<br/>Sora, parallel"]
-        ASSEMBLER["Assembler<br/>Validation, sorting"]
-        EVAL["Story Evaluator<br/>Quality scoring"]
-        STORY_GUARD["Story Guardrail<br/>3-layer text safety"]
-        IMG_GUARD["Image Guardrail N instances<br/>Vision-based, with retry"]
-        VID_GUARD["Video Guardrail M instances<br/>Prompt moderation"]
-        AGGREGATOR["Guardrail Aggregator<br/>Decision logic"]
-        REVIEW["Human Review Gate<br/>LangGraph Interrupt"]
-        PUBLISHER["Publisher<br/>Final persistence"]
+        INPUT["input_moderator<br/>OpenAI Moderation API"]
+        STORY["story_writer<br/>LLM: GPT-4/Claude/Ollama"]
+        IMG_PROMPT["image_prompter"]
+        VID_PROMPT["video_prompter"]
+        IMG_GEN["generate_single_image<br/>N instances, DALL-E 3, parallel"]
+        VID_GEN["generate_single_video<br/>M instances, Sora, parallel"]
+        ASSEMBLER["assembler<br/>Validation, sorting"]
+        EVAL["story_evaluator<br/>Quality scoring"]
+        STORY_GUARD["story_guardrail<br/>3-layer text safety"]
+        IMG_GUARD["image_guardrail_with_retry<br/>N instances, vision-based"]
+        VID_GUARD["video_guardrail_with_retry<br/>M instances, prompt moderation"]
+        AGGREGATOR["guardrail_aggregator<br/>Decision logic"]
+        REVIEW["human_review_gate<br/>LangGraph Interrupt"]
+        PUBLISHER["publisher<br/>Final persistence"]
+        AUTO_REJECT["mark_auto_rejected<br/>Auto-rejection"]
+        REJECT["mark_rejected<br/>Human rejection"]
     end
     
     subgraph Storage["Storage & Infrastructure"]
-        PG[("PostgreSQL<br/>Stories, jobs, evaluations")]
+        PG[("PostgreSQL<br/>Stories, jobs, evaluations<br/>Checkpointer")]
         REDIS[("Redis<br/>Rate limiting, cache")]
         S3["AWS S3 + CloudFront<br/>Optional media storage"]
         LOCAL["Local Storage<br/>Development"]
@@ -61,7 +63,8 @@ graph TB
     
     API --> CELERY
     CELERY --> INPUT
-    INPUT --> STORY
+    INPUT -->|Safe| STORY
+    INPUT -->|Blocked| AUTO_REJECT
     STORY --> IMG_PROMPT
     STORY --> VID_PROMPT
     IMG_PROMPT --> IMG_GEN
@@ -76,13 +79,18 @@ graph TB
     STORY_GUARD --> AGGREGATOR
     IMG_GUARD --> AGGREGATOR
     VID_GUARD --> AGGREGATOR
-    AGGREGATOR --> REVIEW
-    REVIEW --> PUBLISHER
+    AGGREGATOR -->|Hard violations| AUTO_REJECT
+    AGGREGATOR -->|Passed| REVIEW
+    REVIEW -->|Approved| PUBLISHER
+    REVIEW -->|Rejected| REJECT
     
     PUBLISHER --> PG
+    AUTO_REJECT --> PG
+    REJECT --> PG
     API --> REDIS
     ASSEMBLER --> S3
     ASSEMBLER --> LOCAL
+    REVIEW -.->|State checkpoint| PG
 ```
 
 ---

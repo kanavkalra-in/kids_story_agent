@@ -11,31 +11,43 @@ Kids Story Agent implements a **seamless human-in-the-loop review system** using
 ```mermaid
 sequenceDiagram
     participant Workflow as LangGraph Workflow
-    participant Aggregator as Guardrail Aggregator
+    participant Aggregator as guardrail_aggregator
     participant ReviewGate as human_review_gate
     participant Checkpoint as PostgreSQL Checkpointer
+    participant Celery as Celery Task
     participant API as Review API
     participant Reviewer as Human Reviewer
-    participant Publisher as Publisher/Reject
+    participant Publisher as publisher/mark_rejected
     
-    Workflow->>Aggregator: Guardrails complete
-    Aggregator->>ReviewGate: Route to review
-    ReviewGate->>ReviewGate: interrupt(review_package)
-    ReviewGate->>Checkpoint: Save state
-    Note over Workflow,Checkpoint: GRAPH PAUSES - STATE SAVED
-    ReviewGate-->>Workflow: GraphInterrupt exception
-    
-    API->>Reviewer: List pending reviews
-    Reviewer->>API: Get review details
-    Reviewer->>API: Submit decision (approved/rejected)
-    API->>Workflow: Command(resume={decision})
-    
-    Note over Workflow,Publisher: GRAPH RESUMES
-    Workflow->>Publisher: Route based on decision
-    alt Approved
-        Publisher->>Publisher: Publish story
-    else Rejected
-        Publisher->>Publisher: Mark as rejected
+    Workflow->>Aggregator: All guardrails complete<br/>(story_evaluator, story_guardrail,<br/>image_guardrail_with_retry,<br/>video_guardrail_with_retry)
+    Aggregator->>Aggregator: Check for hard violations
+    alt Hard violations found
+        Aggregator->>Workflow: Route to mark_auto_rejected
+    else No hard violations
+        Aggregator->>ReviewGate: Route to human review
+        ReviewGate->>ReviewGate: Build review_package
+        ReviewGate->>ReviewGate: interrupt(review_package)
+        ReviewGate->>Checkpoint: Save full state<br/>(thread_id=job_id)
+        Note over Workflow,Checkpoint: GRAPH PAUSES - STATE SAVED
+        ReviewGate-->>Celery: GraphInterrupt exception
+        Celery->>Celery: Update job status to<br/>"pending_review"
+        
+        API->>Reviewer: List pending reviews<br/>GET /api/v1/reviews/pending
+        Reviewer->>API: Get review details<br/>GET /api/v1/reviews/{job_id}
+        Reviewer->>API: Submit decision<br/>POST /api/v1/reviews/{job_id}/decision
+        API->>Workflow: Command(resume={decision,<br/>comment, reviewer_id})
+        API->>Checkpoint: Load state<br/>(thread_id=job_id)
+        
+        Note over Workflow,Publisher: GRAPH RESUMES FROM INTERRUPT
+        Workflow->>ReviewGate: Resume with decision
+        ReviewGate->>Workflow: Return review_decision
+        alt Approved
+            Workflow->>Publisher: Route to publisher
+            Publisher->>Publisher: Persist story to database
+        else Rejected
+            Workflow->>Publisher: Route to mark_rejected
+            Publisher->>Publisher: Mark job as rejected
+        end
     end
 ```
 

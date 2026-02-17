@@ -25,6 +25,7 @@ graph TB
     subgraph Agents["Agent Layer"]
         GEN["Generation Agents"]
         EVAL_AGENTS["Evaluation Agents"]
+        GUARD_AGENTS["Guardrail Agents<br/>Story, Image, Video"]
         REVIEW_AGENTS["Review Agents"]
     end
     
@@ -48,9 +49,12 @@ graph TB
     GRAPH --> STATE
     GRAPH --> GEN
     GRAPH --> EVAL_AGENTS
+    GRAPH --> GUARD_AGENTS
     GRAPH --> REVIEW_AGENTS
     GEN --> LLM
     EVAL_AGENTS --> MOD
+    GUARD_AGENTS --> MOD
+    GUARD_AGENTS --> LLM
     GEN --> STORAGE
     REVIEW_AGENTS --> CHECKPOINT
     LLM --> PG
@@ -84,18 +88,18 @@ graph TB
     STORY --> IMG_PROMPT["image_prompter"]
     STORY --> VID_PROMPT["video_prompter"]
     
-    IMG_PROMPT --> IMG_GEN["generate_single_image<br/>N instances"]
-    VID_PROMPT --> VID_GEN["generate_single_video<br/>M instances"]
+    IMG_PROMPT --> IMG_GEN["generate_single_image<br/>N instances, Send"]
+    VID_PROMPT --> VID_GEN["generate_single_video<br/>M instances, Send"]
     
-    IMG_GEN --> ASSEMBLER["assembler"]
+    IMG_GEN --> ASSEMBLER["assembler<br/>fan-in"]
     VID_GEN --> ASSEMBLER
     
-    ASSEMBLER --> ROUTE["route_to_guardrails<br/>fan-out"]
+    ASSEMBLER --> ROUTE["route_to_guardrails<br/>fan-out via Send"]
     
     ROUTE --> EVAL["story_evaluator"]
     ROUTE --> STORY_GUARD["story_guardrail"]
-    ROUTE --> IMG_GUARD["image_guardrail<br/>N instances"]
-    ROUTE --> VID_GUARD["video_guardrail<br/>M instances"]
+    ROUTE --> IMG_GUARD["image_guardrail_with_retry<br/>N instances, Send"]
+    ROUTE --> VID_GUARD["video_guardrail_with_retry<br/>M instances, Send"]
     
     EVAL --> AGGREGATOR["guardrail_aggregator<br/>fan-in"]
     STORY_GUARD --> AGGREGATOR
@@ -104,7 +108,7 @@ graph TB
     
     AGGREGATOR --> CHECK_VIOLATIONS{"Hard violations?"}
     CHECK_VIOLATIONS -->|Yes| AUTO_REJECT2["mark_auto_rejected"]
-    CHECK_VIOLATIONS -->|No| REVIEW["human_review_gate<br/>interrupt"]
+    CHECK_VIOLATIONS -->|No| REVIEW["human_review_gate<br/>interrupt()"]
     AUTO_REJECT2 --> END2([END])
     
     REVIEW --> CHECK_DECISION{"Decision?"}
@@ -119,6 +123,8 @@ graph TB
     style END3 fill:#90EE90
     style END4 fill:#FFB6C1
     style REVIEW fill:#FFD700
+    style ROUTE fill:#E6E6FA
+    style AGGREGATOR fill:#E6E6FA
 ```
 
 ### Phase 1: Input Moderation
@@ -171,8 +177,8 @@ graph TB
 **Nodes**:
 - `story_evaluator`: LLM-based quality scoring (5 dimensions)
 - `story_guardrail`: 3-layer text safety checks
-- `image_guardrail_with_retry`: Vision-based image safety (×N parallel)
-- `video_guardrail_with_retry`: Video prompt moderation using text guardrails (×M parallel)
+- `image_guardrail_with_retry`: Vision-based image safety with single retry (×N parallel)
+- `video_guardrail_with_retry`: Video prompt moderation using text guardrails with single retry (×M parallel)
 - `guardrail_aggregator`: Combines all results, makes pass/fail decision
 
 **Parallelism Strategy**:
@@ -188,7 +194,7 @@ def route_to_guardrails(state: StoryState) -> list[Send]:
     # Per-image guardrails
     for url in image_urls:
         sends.append(Send("image_guardrail_with_retry", {...}))
-    # Per-video guardrails
+    # Per-video guardrails (prompt moderation)
     for url in video_urls:
         sends.append(Send("video_guardrail_with_retry", {...}))
     return sends
@@ -200,7 +206,7 @@ def route_to_guardrails(state: StoryState) -> list[Send]:
 - Image guardrails: Vision-based safety check → if hard violation found, regenerate once and re-check
 - Video guardrails: Prompt moderation (text guardrails on Sora prompt) → if hard violation found, regenerate once and re-check
 - If retry also fails → raises `StoryGenerationError` (fails entire job)
-- Note: Video frame sampling is planned but not yet implemented; currently only prompt moderation is used
+- Note: Video frame sampling is planned but not yet implemented; currently only prompt moderation is used (frame extraction with ffmpeg is planned)
 
 ### Phase 4: Human Review & Publishing
 

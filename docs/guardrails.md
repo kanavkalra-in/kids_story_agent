@@ -400,14 +400,14 @@ Different thresholds for different age groups:
 
 ```mermaid
 graph TD
-    START["Story Text"] --> L0["Layer 0: OpenAI Moderation API"]
+    START["Story Text"] --> L0["Layer 0: OpenAI Moderation API<br/>~50ms, free"]
     L0 --> L0_CHECK{"Hard violation?"}
     L0_CHECK -->|Yes| AUTO_REJECT["Auto-reject or flag"]
-    L0_CHECK -->|No| L1["Layer 1: PII Detection"]
+    L0_CHECK -->|No| L1["Layer 1: PII Detection<br/>Regex, ~0ms"]
     
     L1 --> L1_CHECK{"PII found?"}
     L1_CHECK -->|Yes| HARD_VIOLATION["Hard violation"]
-    L1_CHECK -->|No| L2["Layer 2: Custom LLM Analysis"]
+    L1_CHECK -->|No| L2["Layer 2: Custom LLM Analysis<br/>~2-3s, domain-specific"]
     
     L2 --> FEAR{"Fear intensity > threshold?"}
     FEAR -->|Yes| HARD_VIOLATION
@@ -420,22 +420,40 @@ graph TD
     POLITICAL -->|No| RELIGIOUS{"Religious references?"}
     RELIGIOUS -->|Yes| SOFT_WARNING["Soft warning"]
     RELIGIOUS -->|No| PASS["Pass"]
+    
+    style L0 fill:#E6F3FF
+    style L1 fill:#E6F3FF
+    style L2 fill:#E6F3FF
+    style HARD_VIOLATION fill:#FFB6C1
+    style SOFT_WARNING fill:#FFE4B5
+    style PASS fill:#90EE90
 ```
 
 ### Media Guardrails
 
 ```mermaid
 graph TD
-    START["Generated Image/Video"] --> CHECK["Safety Check<br/>vision/prompt"]
-    CHECK --> HARD_CHECK{"Hard violation?"}
-    HARD_CHECK -->|Yes| RETRY["Regenerate<br/>retry once"]
-    RETRY --> RE_CHECK["Re-check"]
+    START["Generated Image/Video"] --> CHECK["Safety Check"]
+    CHECK -->|Image| IMG_CHECK["Vision-based LLM analysis<br/>NSFW, weapons, children, horror"]
+    CHECK -->|Video| VID_CHECK["Prompt moderation<br/>Text guardrails on Sora prompt"]
+    
+    IMG_CHECK --> HARD_CHECK{"Hard violation?"}
+    VID_CHECK --> HARD_CHECK
+    
+    HARD_CHECK -->|Yes| RETRY["Regenerate once<br/>Single retry attempt"]
+    RETRY --> RE_CHECK["Re-check safety"]
     RE_CHECK --> STILL_FAILS{"Still fails?"}
-    STILL_FAILS -->|Yes| ERROR["StoryGenerationError"]
-    STILL_FAILS -->|No| PROCEED["Proceed"]
+    STILL_FAILS -->|Yes| ERROR["StoryGenerationError<br/>Fails entire graph"]
+    STILL_FAILS -->|No| PROCEED["Proceed to aggregator"]
     HARD_CHECK -->|No| SOFT_CHECK{"Soft violations?"}
-    SOFT_CHECK -->|Yes| FLAG["Flag for review"]
+    SOFT_CHECK -->|Yes| FLAG["Flag for review<br/>Show in review package"]
     SOFT_CHECK -->|No| PROCEED
+    
+    style IMG_CHECK fill:#E6F3FF
+    style VID_CHECK fill:#E6F3FF
+    style ERROR fill:#FFB6C1
+    style FLAG fill:#FFE4B5
+    style PROCEED fill:#90EE90
 ```
 
 ## Best Practices
